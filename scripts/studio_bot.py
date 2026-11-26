@@ -16,7 +16,7 @@ from typing import AbstractSet, Callable, Mapping
 from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID, build_demo_postcard_package
 from ingest_asset import ID_RE, MAX_INPUT_BYTES, ingest_asset, sha256_file
 from store_db import DEFAULT_DB_PATH, StoreDB
-from package_version import verified_order_package
+from package_version import staged_order_package
 
 ALLOWED_PUSH_BRANCH = 'feat/production-batch-01'
 FORBIDDEN_PUSH_BRANCHES = frozenset({'main', 'master', 'HEAD'})
@@ -310,68 +310,43 @@ def _deliver_paid_order(
 ) -> None:
     if str(chat_id) != str(order['chat_id']) or str(chat_id) != str(order['user_id']):
         return
-    existing = store.get_delivery_by_order(order['order_id'])
-    if existing and existing.get('status') == 'sent':
+    if store.get_delivery_by_order(order['order_id']) is not None:
+        # Even a legacy pending row may represent an already accepted upload.
         return
     packages_dir = _resolved_packages_dir(cfg)
     version = store.get_order_package_version(order)
-    pkg_path = verified_order_package(packages_dir, order, version)
-    if pkg_path is None:
-        store.mark_delivery_failed(order['order_id'], 'Ordered ZIP missing or version/hash mismatch')
-        api_fn(
-            cfg.token,
-            'sendMessage',
-            {
-                'chat_id': chat_id,
-                'text': (
-                    f"Оплата по заказу {order['order_id']} получена, но архив временно недоступен. "
-                    f"Обратитесь в /paysupport {order['order_id']}."
-                ),
-            },
-        )
-        return
-
-    pkg_sha = version['package_sha256']
-    delivery = store.create_or_get_delivery(order, pkg_path, pkg_sha)
-    if delivery.get('status') == 'sent':
-        return
-
+    with staged_order_package(packages_dir, order, version) as pkg_path:
+        if pkg_path is None:
+            store.log_audit('delivery_package_unavailable', actor_id=str(order['user_id']),
+                            order_id=order['order_id'], product_id=order['product_id'])
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text':
+                   f"Архив заказа {order['order_id']} временно недоступен. Обратитесь в /paysupport."})
+            return
+        if not store.reserve_paid_delivery(order, version):
+            return
+        try:
+            resp = send_document_fn(
+                cfg.token, chat_id, pkg_path,
+                f"NAUM AI Creative Studio — заказ {order['order_id']} ({order['product_id']})",
+            )
+            file_id = str((((resp or {}).get('result') or {}).get('document') or {}).get('file_id') or '')
+            if not isinstance(resp, dict) or resp.get('ok') is not True or not file_id:
+                raise RuntimeError('Telegram did not confirm document delivery')
+            store.mark_delivery_sent(order['order_id'], telegram_file_id=file_id)
+        except Exception:
+            # A remote timeout or local commit failure is ambiguous. Never replay automatically.
+            store.log_audit('delivery_needs_reconciliation', actor_id=str(order['user_id']),
+                            order_id=order['order_id'], product_id=order['product_id'])
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text':
+                   f"Доставка заказа {order['order_id']} требует проверки. Обратитесь в /paysupport."})
+            return
+    # Notification failure must not undo the durable successful delivery.
     try:
-        resp = send_document_fn(
-            cfg.token,
-            chat_id,
-            pkg_path,
-            f"NAUM AI Creative Studio — заказ {order['order_id']} ({order['product_id']})",
-        )
-        file_id = str((((resp or {}).get('result') or {}).get('document') or {}).get('file_id') or '')
-        if not isinstance(resp, dict) or resp.get('ok') is not True or not file_id:
-            raise RuntimeError('Telegram did not confirm document delivery')
-        store.mark_delivery_sent(order['order_id'], telegram_file_id=file_id)
-        api_fn(
-            cfg.token,
-            'sendMessage',
-            {
-                'chat_id': chat_id,
-                'text': (
-                    f"Спасибо за покупку! Заказ {order['order_id']} доставлен.\n"
-                    f"Посмотреть историю заказов: /myorders · Поддержка по оплате: /paysupport"
-                ),
-            },
-        )
-    except Exception as exc:
-        err = _sanitize_error(exc, cfg.token)
-        store.mark_delivery_failed(order['order_id'], err)
-        api_fn(
-            cfg.token,
-            'sendMessage',
-            {
-                'chat_id': chat_id,
-                'text': (
-                    f"Оплата по заказу {order['order_id']} подтверждена, но отправка файла не удалась. "
-                    f"Напишите в /paysupport {order['order_id']}."
-                ),
-            },
-        )
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text':
+               f"Спасибо за покупку! Заказ {order['order_id']} доставлен. /myorders · /paysupport"})
+    except Exception:
+        store.log_audit('delivery_notification_failed', actor_id=str(order['user_id']),
+                        order_id=order['order_id'], product_id=order['product_id'])
 
 
 def _handle_successful_payment(
