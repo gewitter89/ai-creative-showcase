@@ -88,7 +88,9 @@
       "preview_path": "assets/3d/3d-owl-03/preview.webp",
       "delivery_requirements": "Три PNG: front / left side / back. Сохранять геометрию и пропорции по первому референсу. Без STL/3MF, без обещания печатаемости.",
       "prompt": "Create ONE orthographic design-reference image for an original small adorable winter owl figurine with a thick integrated scarf. [VIEW] view. Consistent silhouette: plump rounded body, two recessed round eyes, tiny rounded beak, wings merged into sides, scarf wraps the neck with short rounded ends attached to body, wide flat oval base, no loose or fragile details. Monochrome gray clay render, plain neutral background, soft even light, centered 1:1, orthographic, no text, logos or watermark. Concept only, not a printable model.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "047f4f0454e238754c783fe9e5734af10b59c1c6247a6d30e5c2fd019dffbf40",
+      "original_dimensions": "1254x1254"
     }
   ]
 }
