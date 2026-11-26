@@ -8,7 +8,9 @@
       "preview_path": "assets/newyear/ny-kyiv-01/preview.webp",
       "delivery_requirements": "Печатная версия 150×100 мм при 300 dpi: 1772×1181 px или больше при том же отношении сторон; отдельная версия для соцсетей. После генерации добавить «З Новим 2027 роком!» вручную, проверить орфографию.",
       "prompt": "Create an original premium winter holiday postcard illustration of Kyiv at blue hour, Maidan Nezalezhnosti with a recognizable Independence Monument and softly lit surrounding buildings, light snowfall, deep midnight blue sky, warm amber Christmas lights, restrained Ukrainian blue and gold accents, elegant festive atmosphere, realistic architectural details, balanced cinematic composition, fine detail but not cluttered, horizontal 3:2 composition, clear open sky for a later greeting. No letters, text, logos, flags with inscriptions, watermarks, frames, or mockup. Do not imitate a particular artist.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "98f153cb22eb635199f7ae172f1ace692ff7d021af775eeaee73c5bbd29d7269",
+      "original_dimensions": "1024x682"
     },
     {
       "id": "ny-cozy-02",
