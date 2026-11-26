@@ -22,9 +22,9 @@
       "description": "Уютная праздничная открытка с заснеженным окном, свечами и еловыми ветвями. (В разработке.)",
       "format": "PNG / JPG · 3:2",
       "price_uah": 129,
-      "image": "",
-      "badge": "В разработке",
-      "status": "черновик"
+      "image": "assets/newyear/ny-cozy-02/preview.webp",
+      "badge": "Проверка качества",
+      "status": "проверка качества"
     },
     {
       "id": "ny-minimal-03",
