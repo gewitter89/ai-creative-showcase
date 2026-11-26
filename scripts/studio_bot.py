@@ -1193,6 +1193,23 @@ def process_update(
         )
         return
 
+    if cmd == '/radar':
+        if not admin:
+            return
+        target_url = text[len('/radar'):].strip()
+        if not target_url or not target_url.startswith('http'):
+            api_fn(cfg.token, 'sendMessage', {
+                'chat_id': chat_id,
+                'text': 'Отправь ссылку после команды, например: /radar https://twitter.com/... или https://github.com/...',
+            })
+            return
+        ok, reply = _queue_custom_idea(f"Разбор ссылки из сети: {target_url}")
+        api_fn(cfg.token, 'sendMessage', {
+            'chat_id': chat_id,
+            'text': f"🔍 Взял ссылку на радар: {target_url}\nАгенты разберут суть и подготовят ТЗ.",
+        })
+        return
+
     if cmd == '/idea':
         if not admin:
             return
