@@ -12,6 +12,9 @@ from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID
 from build_promo_reels import DEFAULT_PROMO_DIR
 from store_db import DEFAULT_DB_PATH, StoreDB
 
+BATCH_02_MANIFEST_REL = Path('manifests/batch_02_manifest.json')
+BATCH_02_PROMPTS_REL = Path('manifests/batch_02_prompts.md')
+
 PIPELINE_STAGES = (
     'research',
     'specification',
@@ -69,6 +72,116 @@ def derive_item_stage(
     return 'research'
 
 
+def collect_batch_02_report(
+    repo_root: Path,
+    catalog_ids: set[str] | None = None,
+    packages_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    promo_dir: Path = Path(DEFAULT_PROMO_DIR),
+) -> dict:
+    """Build a readiness report for upcoming Batch 02 without mutating catalog.json."""
+    manifest_path = repo_root / BATCH_02_MANIFEST_REL
+    prompts_path = repo_root / BATCH_02_PROMPTS_REL
+    stage_counts = {stage: 0 for stage in PIPELINE_STAGES}
+    if not manifest_path.is_file():
+        return {
+            'batch': '02',
+            'present': False,
+            'manifest_path': str(BATCH_02_MANIFEST_REL),
+            'prompts_path': str(BATCH_02_PROMPTS_REL),
+            'prompts_doc_present': prompts_path.is_file(),
+            'total_items': 0,
+            'in_catalog_count': 0,
+            'prompts_ready': 0,
+            'originals_ready': 0,
+            'previews_ready': 0,
+            'packages_ready': 0,
+            'promo_reels_ready': 0,
+            'by_category': {},
+            'stage_counts': stage_counts,
+            'items': [],
+        }
+
+    if catalog_ids is None:
+        cat_path = repo_root / 'catalog.json'
+        if cat_path.is_file():
+            cat_data = json.loads(cat_path.read_text(encoding='utf-8'))
+            catalog_ids = {
+                str(x.get('id')) for x in cat_data.get('items', []) if isinstance(x, dict) and x.get('id')
+            }
+        else:
+            catalog_ids = set()
+
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    items_report: list[dict] = []
+    by_category: dict[str, int] = {}
+
+    for m_item in manifest.get('items', []):
+        if not isinstance(m_item, dict):
+            continue
+        pid = str(m_item.get('id') or '')
+        if not pid:
+            continue
+        category = str(m_item.get('category') or '')
+        preview_rel = str(m_item.get('preview_path') or '')
+        preview_ready = bool(preview_rel) and (repo_root / preview_rel).is_file()
+        original_ready = bool(m_item.get('original_sha256'))
+        prompt_ready = bool(m_item.get('prompt'))
+        package_ready = (packages_dir / f'{pid}.zip').is_file()
+        promo_reel_ready = (promo_dir / f'{pid}_reel.mp4').is_file()
+        in_catalog = pid in catalog_ids
+
+        stage = derive_item_stage(
+            {
+                'id': pid,
+                'status': m_item.get('status', 'черновик'),
+                'image': preview_rel if preview_ready else '',
+            },
+            m_item,
+            packages_dir,
+            promo_dir,
+        )
+        stage_counts[stage] += 1
+        by_category[category] = by_category.get(category, 0) + 1
+        items_report.append(
+            {
+                'id': pid,
+                'title': m_item.get('title', ''),
+                'category': category,
+                'status': m_item.get('status', 'prompt_ready'),
+                'stage': stage,
+                'prompt_ready': prompt_ready,
+                'original_ready': original_ready,
+                'preview_ready': preview_ready,
+                'package_ready': package_ready,
+                'promo_reel_ready': promo_reel_ready,
+                'in_catalog': in_catalog,
+                'proposed_price_uah': m_item.get('proposed_price_uah'),
+                'proposed_price_xtr': m_item.get('proposed_price_xtr'),
+            }
+        )
+
+    return {
+        'batch': str(manifest.get('batch') or '02'),
+        'season': str(manifest.get('season') or 'valentine_spring_overlays'),
+        'title': str(manifest.get('title') or ''),
+        'status': str(manifest.get('status') or 'draft_not_for_sale'),
+        'present': True,
+        'manifest_path': str(BATCH_02_MANIFEST_REL),
+        'prompts_path': str(BATCH_02_PROMPTS_REL),
+        'prompts_doc_present': prompts_path.is_file(),
+        'total_items': len(items_report),
+        'in_catalog_count': sum(1 for x in items_report if x['in_catalog']),
+        'prompts_ready': sum(1 for x in items_report if x['prompt_ready']),
+        'originals_ready': sum(1 for x in items_report if x['original_ready']),
+        'previews_ready': sum(1 for x in items_report if x['preview_ready']),
+        'packages_ready': sum(1 for x in items_report if x['package_ready']),
+        'promo_reels_ready': sum(1 for x in items_report if x['promo_reel_ready']),
+        'by_category': by_category,
+        'stage_counts': stage_counts,
+        'items': items_report,
+    }
+
+
 def collect_pipeline_snapshot(
     repo_root: Path,
     db_path: Path = Path(DEFAULT_DB_PATH),
@@ -84,10 +197,12 @@ def collect_pipeline_snapshot(
 
     items_state: list[dict] = []
     stage_counts = {stage: 0 for stage in PIPELINE_STAGES}
+    catalog_ids: set[str] = set()
     for c_item in catalog.get('items', []):
         pid = str(c_item.get('id') or '')
         if not pid:
             continue
+        catalog_ids.add(pid)
         stage = derive_item_stage(c_item, manifest_by_id.get(pid), packages_dir, promo_dir)
         stage_counts[stage] += 1
         items_state.append(
@@ -123,6 +238,12 @@ def collect_pipeline_snapshot(
     demo_reel_ready = (promo_dir / 'demo_ny_reel.mp4').is_file()
     packages_ready_count = sum(1 for x in items_state if x['package_ready'])
     packages_pending_count = len(items_state) - packages_ready_count
+    batch_02 = collect_batch_02_report(
+        repo_root=repo_root,
+        catalog_ids=catalog_ids,
+        packages_dir=packages_dir,
+        promo_dir=promo_dir,
+    )
 
     return {
         'generated_at': utc_now_iso(),
@@ -154,6 +275,7 @@ def collect_pipeline_snapshot(
         },
         'analytics': analytics,
         'items': items_state,
+        'batch_02': batch_02,
     }
 
 
@@ -164,6 +286,12 @@ def sync_snapshot_to_agent_control(ac_db_path: Path, snapshot: dict) -> dict:
 
     now = utc_now_iso()
     summary = snapshot.get('summary') or {}
+    batch_02 = snapshot.get('batch_02') or {}
+    batch_02_log = (
+        f"batch_02={batch_02.get('total_items', 0)} items "
+        f"(prompts={batch_02.get('prompts_ready', 0)}, previews={batch_02.get('previews_ready', 0)}, "
+        f"ready={batch_02.get('packages_ready', 0)}, in_catalog={batch_02.get('in_catalog_count', 0)})"
+    )
     with sqlite3.connect(str(ac_db_path), timeout=15.0) as conn:
         conn.execute(
             'CREATE TABLE IF NOT EXISTS ac_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'
@@ -184,6 +312,10 @@ def sync_snapshot_to_agent_control(ac_db_path: Path, snapshot: dict) -> dict:
             (json.dumps(snapshot, ensure_ascii=False),),
         )
         conn.execute(
+            "INSERT OR REPLACE INTO ac_meta(k, v) VALUES ('naum_showcase_batch_02', ?)",
+            (json.dumps(batch_02, ensure_ascii=False),),
+        )
+        conn.execute(
             "INSERT OR REPLACE INTO ac_meta(k, v) VALUES ('naum_showcase_blocker_generation', ?)",
             (json.dumps(FREE_IMAGE_GENERATOR_BLOCKER, ensure_ascii=False),),
         )
@@ -195,7 +327,8 @@ def sync_snapshot_to_agent_control(ac_db_path: Path, snapshot: dict) -> dict:
                 (
                     f"Showcase pipeline synced ({summary.get('total_products', len(snapshot.get('items', [])))} items, "
                     f"ready={summary.get('packages_ready', 0)}, pending={summary.get('packages_pending', 0)}, "
-                    f"demo_ready={summary.get('demo_ready', False)}); blocker={FREE_IMAGE_GENERATOR_BLOCKER['status']}"
+                    f"demo_ready={summary.get('demo_ready', False)}); {batch_02_log}; "
+                    f"blocker={FREE_IMAGE_GENERATOR_BLOCKER['status']}"
                 ),
                 now,
             ),
