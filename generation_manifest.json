@@ -38,7 +38,9 @@
       "preview_path": "assets/photoshop/ps-pack-01/preview.webp",
       "delivery_requirements": "6 отдельных PNG (цель 3000×2000 px при сохранении качества): VARIANT = blue diagonal light streak; warm golden bokeh clusters; subtle icy blue edge glow; warm circular lens flare; sparse white sparkling snow dust; violet-blue soft light leak. Проверить чёрный фон, Screen blending в Photoshop; не выдавать чёрный фон за прозрачность.",
       "prompt": "Create ONE isolated photographic light-effect overlay on a perfectly solid pure black RGB 0,0,0 background. The effect is [VARIANT]. Soft realistic luminous glow, clean isolated edges, delicate gradients, no foreground objects, no text, no logos, no watermark, no texture in the black background, horizontal 3:2. Preserve dark background for Photoshop Screen blending. Output one asset per generation, not a contact sheet.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "0105e0812b34465c76e7b15d47dd8dc9373900694a574f3366fd71be343a69be",
+      "original_dimensions": "1536x1024"
     },
     {
       "id": "ps-snow-02",
