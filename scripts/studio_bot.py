@@ -842,6 +842,123 @@ def _handle_refund_command(
     )
 
 
+
+def _queue_radar_task(source_id: str) -> tuple[bool, str]:
+    """Read signal from radar.db and enqueue a cloud GitHub MVP task."""
+    import json as _json
+    import re as _re
+    import sqlite3 as _sqlite3
+    radar_db = Path(os.environ.get('STUDIO_RADAR_DB', '/var/lib/naum-studio/radar.db'))
+    queue_file = Path(os.environ.get('STUDIO_AUTOPILOT_QUEUE', '/var/lib/naum-studio/autopilot_queue.json'))
+    if not radar_db.is_file():
+        return False, 'База радара пока пуста.'
+    conn = _sqlite3.connect(radar_db)
+    row = conn.execute(
+        'SELECT source_id, title, url, summary, license FROM signals WHERE source_id = ?',
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return False, f'Находка {source_id} не найдена в базе.'
+    sid, title, url, summary, lic = row
+    queue = _json.loads(queue_file.read_text(encoding='utf-8')) if queue_file.is_file() else []
+    slug = _re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')[:32] or 'idea'
+    if any(x.get('source_id') == sid for x in queue):
+        return True, f'Задача «{title}» уже стоит в очереди облака.'
+    queue.append({
+        'id': f'radar-{slug}',
+        'source_id': sid,
+        'title': f'MVP по находке радара: {title}',
+        'prompt': (
+            f'Ты — облачный Antigravity на VPS (инстанс Kyiv-AI-Pro, --remote-control). '
+            f'Владелец нажал «Взять в работу» по находке Opportunity Radar:\n'
+            f'- Проект/идея: {title}\n- Ссылка: {url}\n- Лицензия: {lic}\n- Описание: {summary}\n\n'
+            f'Задача: изучи идею, создай на отдельной ветке (НЕ в main) рабочий MVP/прототип или интеграцию в /opt/ai-creative-showcase '
+            f'(или новый подпроект в /opt/ai-projects/{slug} с git + Draft PR на GitHub), напиши автотесты pytest, прогони pytest -q и отчитайся.'
+        ),
+    })
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    queue_file.write_text(_json.dumps(queue, ensure_ascii=False, indent=2), encoding='utf-8')
+    return True, f'🚀 Поставлено в очередь облака: {title}\nАвтопилот (таймер до 3 мин) подхватит задачу и откроет ветку на GitHub.'
+
+
+def _cloud_status_text() -> str:
+    import json as _json
+    import subprocess as _sp
+    state_file = Path(os.environ.get('STUDIO_AUTOPILOT_STATE', '/var/lib/naum-studio/autopilot_state.json'))
+    queue_file = Path(os.environ.get('STUDIO_AUTOPILOT_QUEUE', '/var/lib/naum-studio/autopilot_queue.json'))
+    state = _json.loads(state_file.read_text(encoding='utf-8')) if state_file.is_file() else {}
+    queue = _json.loads(queue_file.read_text(encoding='utf-8')) if queue_file.is_file() else []
+    r = _sp.run(
+        ['su', '-', 'antigravity-pro', '-s', '/bin/bash', '-c', 'tmux has-session -t naum-cloud'],
+        capture_output=True, text=True,
+    )
+    active_line = 'работает прямо сейчас (Kyiv-AI-Pro)' if r.returncode == 0 else 'свободен (ждёт задачу)'
+    q_lines = '\n'.join(f"  • {q.get('title', q.get('id'))}" for q in queue[:5]) or '  (очередь пуста)'
+    return (
+        f"🤖 Статус облака:\n"
+        f"• Агент naum-cloud: {active_line}\n"
+        f"• Аккаунт: {state.get('current_account', 'antigravity-pro')}\n"
+        f"• Последний коммит: {state.get('last_reported_head', '-')}\n"
+        f"• В очереди ({len(queue)}):\n{q_lines}"
+    )
+
+
+def _handle_callback_query(upd: dict, cfg: BotConfig, store, api_fn) -> None:
+    cb = upd.get('callback_query') or {}
+    cb_id = cb.get('id')
+    cb_msg = cb.get('message') or {}
+    chat = cb_msg.get('chat') or {}
+    chat_id = chat.get('id')
+    fake_msg = {'from': cb.get('from') or {}, 'chat': chat}
+    if not (is_owner(fake_msg, cfg.owner_ids) and is_private_chat(fake_msg)):
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Доступ только для владельца в личке.', 'show_alert': True})
+        return
+    data = (cb.get('data') or '').strip()
+    if data.startswith('radar_build:'):
+        sid = data.split(':', 1)[1]
+        ok, reply = _queue_radar_task(sid)
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Готово!' if ok else 'Ошибка'})
+        if chat_id:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': reply})
+        return
+    if data == 'radar_skip':
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Пропущено'})
+        if chat_id:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': '⏭ Находки пропущены. Следующий поиск — по расписанию.'})
+        return
+    if data == 'panel_cloud':
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Обновлено'})
+        if chat_id:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': _cloud_status_text()})
+        return
+    if data == 'panel_radar':
+        import subprocess as _sp
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Запустил разведку...'})
+        _sp.Popen(['/usr/bin/python3', '/opt/opportunity-radar/opportunity_radar.py', '--notify'])
+        if chat_id:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': '📡 Разведка запущена, через ~30 секунд пришлю свежий отчёт с кнопками.'})
+        return
+    if data == 'panel_stats' and store is not None:
+        m = store.get_metrics_summary()
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Готово'})
+        if chat_id:
+            api_fn(
+                cfg.token,
+                'sendMessage',
+                {
+                    'chat_id': chat_id,
+                    'text': (
+                        f"📊 Метрики студии:\n"
+                        f"• Демо: {m['demo_requests']} (выдач {m['demo_deliveries_sent']})\n"
+                        f"• Платные заказы: {m['paid_orders']} ({m['paid_revenue_xtr']} XTR)\n"
+                        f"• Конверсия демо → покупка: {m['demo_to_paid_conversion_pct']}%"
+                    ),
+                },
+            )
+        return
+    api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id})
+
 def process_update(
     upd: dict,
     cfg: BotConfig,
@@ -856,6 +973,10 @@ def process_update(
         raise RuntimeError('STUDIO_OWNER_IDS is empty (fail-closed)')
 
     store = ensure_store(cfg)
+
+    if 'callback_query' in upd and upd['callback_query']:
+        _handle_callback_query(upd, cfg, store, api_fn)
+        return
 
     if 'pre_checkout_query' in upd and upd['pre_checkout_query']:
         if store is None:
@@ -985,6 +1106,20 @@ def process_update(
                 ),
             },
         )
+        return
+
+    if cmd in ('/panel', '/menu'):
+        if not admin:
+            return
+        api_fn(cfg.token, 'sendMessage', {
+            'chat_id': chat_id,
+            'text': '🎛 Пульт управления NAUM Studio:',
+            'reply_markup': {'inline_keyboard': [
+                [{'text': '📡 Запустить разведку сейчас', 'callback_data': 'panel_radar'}],
+                [{'text': '🤖 Статус облака и очереди', 'callback_data': 'panel_cloud'}],
+                [{'text': '📊 Метрики продаж', 'callback_data': 'panel_stats'}],
+            ]},
+        })
         return
 
     if cmd == '/refund':
