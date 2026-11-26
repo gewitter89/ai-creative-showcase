@@ -15,6 +15,7 @@ DEFAULT_DB_PATH = '/var/lib/naum-studio/store.db'
 DB_FILE_MODE = 0o600
 VALID_STATUSES = frozenset({'черновик', 'проверка качества', 'готов к продаже'})
 ACTIVE_ORDER_STATUSES = frozenset({'created', 'invoice_sent', 'pre_checkout_ok'})
+DEMO_PRODUCT_ID = 'demo-ny'
 
 
 def utc_now_iso() -> str:
@@ -727,3 +728,159 @@ class StoreDB:
                 details={'ticket_id': ticket_id},
             )
             return ticket_id
+
+    def _ensure_demo_product_conn(
+        self,
+        conn: sqlite3.Connection,
+        demo_meta: dict | None = None,
+        product_id: str = DEMO_PRODUCT_ID,
+    ) -> None:
+        """Ensure the lead-magnet demo product row exists without polluting paid package_ready counts."""
+        meta = demo_meta or {}
+        title = str(meta.get('title') or 'Демо-открытка «Киев в новогодних огнях» (Бесплатно)').strip()
+        desc = str(meta.get('description') or 'Бесплатная демо-открытка (лид-магнит) NAUM AI Creative Studio.').strip()
+        contents = str(meta.get('package_contents') or 'demo_greeting_ua.png, demo_ny_kyiv.jpg, README.txt, LICENSE.txt').strip()
+        now = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO products (
+                product_id, category, title, description, package_contents,
+                price_uah, price_xtr, status, package_ready, package_path,
+                package_sha256, package_bytes, active_version, updated_at
+            ) VALUES (?, 'newyear', ?, ?, ?, 0, 0, 'готов к продаже', 0, '', '', 0, 1, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                title = excluded.title,
+                description = excluded.description,
+                package_contents = excluded.package_contents,
+                updated_at = excluded.updated_at
+            """,
+            (product_id, title, desc, contents, now),
+        )
+
+    def record_demo_delivery_start(
+        self,
+        user_id: str,
+        chat_id: str,
+        username: str,
+        package_path: Path,
+        package_sha256: str,
+        demo_meta: dict | None = None,
+        product_id: str = DEMO_PRODUCT_ID,
+        source: str = 'demo_ny',
+    ) -> tuple[str, dict | None, dict | None]:
+        """Record a free lead-magnet demo request/order and pending delivery idempotently per user."""
+        now = utc_now_iso()
+        uid = str(user_id)
+        with self._connect() as conn:
+            self._ensure_demo_product_conn(conn, demo_meta=demo_meta, product_id=product_id)
+
+            existing_deliv = conn.execute(
+                """
+                SELECT d.* FROM deliveries d
+                WHERE d.user_id = ? AND d.product_id = ? AND d.status = 'sent'
+                ORDER BY d.id DESC LIMIT 1
+                """,
+                (uid, product_id),
+            ).fetchone()
+            if existing_deliv:
+                existing_order = conn.execute(
+                    'SELECT * FROM orders WHERE order_id = ?',
+                    (existing_deliv['order_id'],),
+                ).fetchone()
+                self._log_audit_conn(
+                    conn,
+                    'demo_repeat_requested',
+                    actor_id=uid,
+                    order_id=existing_deliv['order_id'],
+                    product_id=product_id,
+                    details={'username': username, 'source': source},
+                )
+                return (
+                    'already_delivered',
+                    dict(existing_order) if existing_order else None,
+                    dict(existing_deliv),
+                )
+
+            order_id = f'demo_{uuid.uuid4().hex[:14]}'
+            invoice_payload = f'demo:{order_id}'
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, user_id, chat_id, username, product_id, product_version,
+                    amount_xtr, currency, invoice_payload, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, 0, 'FREE', ?, 'created', ?, ?)
+                """,
+                (order_id, uid, str(chat_id), username, product_id, invoice_payload, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO deliveries (
+                    order_id, user_id, product_id, package_path, package_sha256, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (order_id, uid, product_id, str(package_path), package_sha256, now),
+            )
+            self._log_audit_conn(
+                conn,
+                'demo_requested',
+                actor_id=uid,
+                order_id=order_id,
+                product_id=product_id,
+                details={'username': username, 'source': source, 'is_free_demo': True},
+            )
+            order_row = conn.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            deliv_row = conn.execute('SELECT * FROM deliveries WHERE order_id = ?', (order_id,)).fetchone()
+            return 'ready', dict(order_row), dict(deliv_row)
+
+    def get_metrics_summary(self) -> dict:
+        """Aggregate sales, lead-magnet demo deliveries, and audit metrics from SQLite."""
+        with self._connect() as conn:
+            demo_delivered = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt, COUNT(DISTINCT user_id) AS uniq
+                FROM deliveries WHERE product_id = ? AND status = 'sent'
+                """,
+                (DEMO_PRODUCT_ID,),
+            ).fetchone()
+            demo_repeats = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM audit_events WHERE event_type = 'demo_repeat_requested'"
+            ).fetchone()
+            paid_stats = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt, COALESCE(SUM(total_amount), 0) AS xtr
+                FROM payments WHERE status = 'paid'
+                """
+            ).fetchone()
+            paid_deliveries = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM deliveries
+                WHERE product_id != ? AND status = 'sent'
+                """,
+                (DEMO_PRODUCT_ID,),
+            ).fetchone()
+            converted_leads = conn.execute(
+                """
+                SELECT COUNT(DISTINCT p.user_id) AS cnt
+                FROM payments p
+                INNER JOIN deliveries d ON d.user_id = p.user_id
+                WHERE p.status = 'paid' AND d.product_id = ? AND d.status = 'sent'
+                """,
+                (DEMO_PRODUCT_ID,),
+            ).fetchone()
+            open_tickets = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM support_tickets WHERE status = 'open'"
+            ).fetchone()
+
+        demo_leads = int(demo_delivered['uniq'] or 0)
+        paid_orders = int(paid_stats['cnt'] or 0)
+        conv = round((int(converted_leads['cnt'] or 0) / demo_leads) * 100, 2) if demo_leads > 0 else 0.0
+        return {
+            'demo_deliveries_sent': int(demo_delivered['cnt'] or 0),
+            'demo_unique_leads': demo_leads,
+            'demo_repeat_requests': int(demo_repeats['cnt'] or 0),
+            'paid_orders': paid_orders,
+            'paid_revenue_xtr': int(paid_stats['xtr'] or 0),
+            'paid_deliveries_sent': int(paid_deliveries['cnt'] or 0),
+            'demo_to_paid_conversion_pct': conv,
+            'open_support_tickets': int(open_tickets['cnt'] or 0),
+        }

@@ -16,6 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_catalog_and_storefront_assets_contract():
     catalog = json.loads((REPO_ROOT / 'catalog.json').read_text(encoding='utf-8'))
     assert catalog['telegram_contact'] == 'https://t.me/NaumCreativeStudioBot'
+    demo = catalog.get('demo_offer')
+    assert isinstance(demo, dict)
+    assert demo['id'] == 'demo-ny'
+    assert demo['deeplink'] == 'demo_ny'
+    assert int(demo['price_xtr']) == 0
+    assert int(demo['price_uah']) == 0
     items = catalog['items']
     assert len(items) == 9
 
@@ -35,6 +41,8 @@ def test_catalog_and_storefront_assets_contract():
     assert './app.js' in html
     assert '@media (max-width: 640px)' in css
     assert 'buy_' in js
+    assert 'demo_ny' in js
+    assert 'demo-banner' in html
     assert "status === 'готов к продаже' && packageReady" in js
     assert 'package_contents' in js
 

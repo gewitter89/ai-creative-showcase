@@ -17,6 +17,8 @@ from ingest_asset import CAT_RE, ID_RE, DEFAULT_PRIVATE_DIR, sha256_file
 
 DEFAULT_PACKAGES_DIR = '/var/lib/naum-studio/packages'
 P0_POSTCARD_IDS = ('ny-kyiv-01', 'ny-cozy-02', 'ny-minimal-03')
+DEMO_PRODUCT_ID = 'demo-ny'
+DEMO_SOURCE_PREVIEW = 'assets/newyear/ny-kyiv-01/preview.webp'
 PRINT_SIZE_PX = (1772, 1181)  # 150x100 mm @ 300 dpi
 PRINT_DPI = (300, 300)
 SOCIAL_SIZE_PX = (1200, 800)  # 3:2 web / social media
@@ -327,6 +329,130 @@ def build_all_p0_postcards(
     ]
 
 
+def _render_demo_watermark(canvas_rgba: Image.Image, text: str = 'DEMO · @NaumCreativeStudioBot') -> Image.Image:
+    """Apply a clean semi-transparent demo badge across the bottom edge."""
+    w, h = canvas_rgba.size
+    overlay = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    bar_h = max(44, int(h * 0.065))
+    draw.rectangle([(0, h - bar_h), (w, h)], fill=(8, 13, 23, 190))
+    font = _load_font(24)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    draw.text(((w - tw) // 2, h - bar_h + (bar_h - th) // 2 - 2), text, font=font, fill=(250, 234, 186, 245))
+    return Image.alpha_composite(canvas_rgba, overlay)
+
+
+def build_demo_postcard_package(
+    repo_root: Path,
+    output_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    item_id: str = DEMO_PRODUCT_ID,
+    source_rel_path: str = DEMO_SOURCE_PREVIEW,
+) -> dict:
+    """Build the free lead-magnet demo ZIP package from public preview artwork (no paid original exposed)."""
+    if not ID_RE.fullmatch(item_id):
+        raise ValueError(f'Invalid demo item_id: {item_id!r}')
+    src_path = (repo_root / source_rel_path).resolve()
+    assets_root = (repo_root / 'assets').resolve()
+    if not src_path.is_relative_to(assets_root) or not src_path.is_file():
+        raise FileNotFoundError(f'Demo preview source not found: {src_path}')
+
+    with Image.open(src_path) as img:
+        img.load()
+        rgb = img.convert('RGB')
+        base_social = ImageOps.fit(rgb, SOCIAL_SIZE_PX, method=Image.Resampling.LANCZOS).convert('RGBA')
+
+    # Render greeting onto 1200x800 demo card with subtle DEMO footer
+    spec = POSTCARD_GREETINGS['ny-kyiv-01']
+    font = _load_font(58)
+    measure = ImageDraw.Draw(base_social)
+    bbox = measure.multiline_textbbox((0, 0), spec['text'], font=font, spacing=12, align='center')
+    tw = bbox[2] - bbox[0]
+    x = (SOCIAL_SIZE_PX[0] - tw) // 2
+    y = int(SOCIAL_SIZE_PX[1] * 0.075)
+
+    shadow_layer = Image.new('RGBA', SOCIAL_SIZE_PX, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow_layer).multiline_text(
+        (x + 2, y + 3), spec['text'], font=font, fill=spec['shadow'], spacing=12, align='center'
+    )
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=4))
+    greeting_rgba = Image.alpha_composite(base_social, shadow_layer)
+
+    fg_layer = Image.new('RGBA', SOCIAL_SIZE_PX, (0, 0, 0, 0))
+    ImageDraw.Draw(fg_layer).multiline_text(
+        (x, y), spec['text'], font=font, fill=spec['fill'], spacing=12, align='center'
+    )
+    greeting_rgba = _render_demo_watermark(Image.alpha_composite(greeting_rgba, fg_layer))
+
+    greeting_buf = io.BytesIO()
+    greeting_rgba.save(greeting_buf, format='PNG', optimize=True)
+
+    clean_demo_rgba = _render_demo_watermark(base_social, text='DEMO PREVIEW · @NaumCreativeStudioBot')
+    jpg_buf = io.BytesIO()
+    clean_demo_rgba.convert('RGB').save(jpg_buf, format='JPEG', quality=88, optimize=True)
+
+    readme_txt = (
+        "NAUM AI Creative Studio — Free Demo Postcard (Lead Magnet)\n"
+        "==========================================================\n\n"
+        f"Demo ID: {item_id}\n"
+        "Source Artwork: ny-kyiv-01 (Киев в новогодних огнях)\n\n"
+        "Included Files:\n"
+        "- demo_greeting_ua.png : Demo postcard with Ukrainian greeting (1200x800 px, DEMO tag)\n"
+        "- demo_ny_kyiv.jpg     : Demo clean preview (1200x800 px, DEMO tag)\n"
+        "- README.txt           : How to unlock the full 300 dpi print package\n"
+        "- LICENSE.txt          : Free personal demo license\n\n"
+        "Want the full 300 dpi print version (1772x1181 px) without the DEMO badge?\n"
+        "- Open @NaumCreativeStudioBot and run /catalog or /start buy_ny-kyiv-01\n"
+        "- Bot link: https://t.me/NaumCreativeStudioBot\n"
+    ).encode('utf-8')
+
+    license_txt = (
+        "NAUM AI Creative Studio — Free Demo Asset License\n"
+        "==================================================\n\n"
+        f"Item: {item_id}\n"
+        "Licensor: NAUM AI Creative Studio (https://t.me/NaumCreativeStudioBot)\n\n"
+        "PERMITTED: Personal preview, sharing with friends/family, and evaluating print/visual quality.\n"
+        "PROHIBITED: Commercial use, resale, redistribution in asset packs, or removing attribution.\n"
+    ).encode('utf-8')
+
+    files_map = {
+        'demo_greeting_ua.png': greeting_buf.getvalue(),
+        'demo_ny_kyiv.jpg': jpg_buf.getvalue(),
+        'README.txt': readme_txt,
+        'LICENSE.txt': license_txt,
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zip_dest = output_dir / f'{item_id}.zip'
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{item_id}.', suffix='.zip.tmp', dir=str(output_dir))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, mode='w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for arcname, payload in files_map.items():
+                info = zipfile.ZipInfo(filename=arcname, date_time=(2026, 11, 26, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (0o644 & 0xFFFF) << 16
+                zf.writestr(info, payload)
+        os.chmod(tmp_path, PACKAGE_FILE_MODE)
+        os.replace(tmp_path, zip_dest)
+        os.chmod(zip_dest, PACKAGE_FILE_MODE)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return {
+        'ok': True,
+        'item_id': item_id,
+        'is_demo': True,
+        'package_path': str(zip_dest),
+        'package_sha256': sha256_file(zip_dest),
+        'package_bytes': zip_dest.stat().st_size,
+        'files': list(files_map.keys()),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description='Build commercial ZIP packages for NAUM P0 postcards')
     ap.add_argument('--repo', default='/opt/ai-creative-showcase', help='Path to ai-creative-showcase repo')
@@ -334,16 +460,26 @@ def main() -> None:
     ap.add_argument('--output-dir', default=DEFAULT_PACKAGES_DIR, help='Output packages directory')
     ap.add_argument('--item-id', action='append', dest='item_ids', help='Specific postcard ID (repeatable)')
     ap.add_argument('--skip-hash-check', action='store_true', help='Skip manifest original SHA-256 check')
+    ap.add_argument('--include-demo', action='store_true', help='Also build free demo-ny.zip lead magnet')
+    ap.add_argument('--demo-only', action='store_true', help='Build only free demo-ny.zip lead magnet')
     args = ap.parse_args()
 
-    ids = args.item_ids if args.item_ids else list(P0_POSTCARD_IDS)
-    results = build_all_p0_postcards(
-        repo_root=Path(args.repo).resolve(),
-        item_ids=ids,
-        originals_dir=Path(args.originals_dir),
-        output_dir=Path(args.output_dir),
-        verify_hash=not args.skip_hash_check,
-    )
+    repo_root = Path(args.repo).resolve()
+    out_dir = Path(args.output_dir)
+    results: list[dict] = []
+    if not args.demo_only:
+        ids = args.item_ids if args.item_ids else list(P0_POSTCARD_IDS)
+        results.extend(
+            build_all_p0_postcards(
+                repo_root=repo_root,
+                item_ids=ids,
+                originals_dir=Path(args.originals_dir),
+                output_dir=out_dir,
+                verify_hash=not args.skip_hash_check,
+            )
+        )
+    if args.include_demo or args.demo_only:
+        results.append(build_demo_postcard_package(repo_root=repo_root, output_dir=out_dir))
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AbstractSet, Callable, Mapping
 
-from build_packages import DEFAULT_PACKAGES_DIR
+from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID, build_demo_postcard_package
 from ingest_asset import ID_RE, MAX_INPUT_BYTES, ingest_asset, sha256_file
 from store_db import DEFAULT_DB_PATH, StoreDB
 
@@ -229,6 +229,23 @@ def _load_catalog_and_manifest(repo: Path) -> tuple[list[dict], list[dict]]:
     catalog = json.loads(cat_path.read_text(encoding='utf-8')) if cat_path.is_file() else {}
     manifest = json.loads(man_path.read_text(encoding='utf-8')) if man_path.is_file() else {}
     return list(catalog.get('items', [])), list(manifest.get('items', []))
+
+
+def _load_demo_offer(repo: Path) -> dict:
+    cat_path = repo / 'catalog.json'
+    catalog = json.loads(cat_path.read_text(encoding='utf-8')) if cat_path.is_file() else {}
+    demo = catalog.get('demo_offer') if isinstance(catalog, dict) else None
+    if isinstance(demo, dict) and demo.get('id'):
+        return demo
+    return {
+        'id': DEMO_PRODUCT_ID,
+        'deeplink': 'demo_ny',
+        'title': 'Бесплатная демо-открытка «Киев в новогодних огнях»',
+        'description': 'Ознакомительный ZIP-комплект (лид-магнит) с пометкой DEMO.',
+        'package_contents': 'ZIP-комплект (4 файла): demo_greeting_ua.png, demo_ny_kyiv.jpg, README.txt, LICENSE.txt',
+        'price_uah': 0,
+        'price_xtr': 0,
+    }
 
 
 def ensure_store(cfg: BotConfig) -> StoreDB | None:
@@ -502,24 +519,125 @@ def _handle_buy_deeplink(
     )
 
 
+def _handle_demo_command(
+    msg: dict,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB | None,
+    api_fn: Callable[[str, str, dict | None], dict],
+    send_document_fn: Callable[[str, int | str, Path, str], dict],
+) -> None:
+    """Deliver free lead-magnet demo postcard ZIP without payment and log metrics to SQLite."""
+    demo_meta = _load_demo_offer(cfg.repo)
+    demo_id = str(demo_meta.get('id') or DEMO_PRODUCT_ID)
+    packages_dir = _resolved_packages_dir(cfg)
+    pkg_path = _safe_package_path(packages_dir, demo_id)
+    tmp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+
+    try:
+        if pkg_path is None:
+            try:
+                build_res = build_demo_postcard_package(cfg.repo, output_dir=packages_dir, item_id=demo_id)
+                pkg_path = Path(build_res['package_path'])
+            except PermissionError:
+                tmp_dir_obj = tempfile.TemporaryDirectory(prefix='naum_demo_')
+                build_res = build_demo_postcard_package(cfg.repo, output_dir=Path(tmp_dir_obj.name), item_id=demo_id)
+                pkg_path = Path(build_res['package_path'])
+
+        pkg_sha = sha256_file(pkg_path)
+        user_id = get_sender_id(msg)
+        username = str((msg.get('from') or {}).get('username') or '').strip()
+
+        order: dict | None = None
+        if store is not None:
+            outcome, order, _ = store.record_demo_delivery_start(
+                user_id=user_id,
+                chat_id=str(chat_id),
+                username=username,
+                package_path=pkg_path,
+                package_sha256=pkg_sha,
+                demo_meta=demo_meta,
+                product_id=demo_id,
+                source='demo_ny',
+            )
+            if outcome == 'already_delivered':
+                api_fn(
+                    cfg.token,
+                    'sendMessage',
+                    {
+                        'chat_id': chat_id,
+                        'text': (
+                            'Вы уже получили бесплатную демо-открытку NAUM AI Creative Studio!\n'
+                            'Полные комплекты для печати (300 dpi, без пометки DEMO): /catalog'
+                        ),
+                    },
+                )
+                return
+
+        try:
+            resp = send_document_fn(
+                cfg.token,
+                chat_id,
+                pkg_path,
+                (
+                    f"🎁 {demo_meta.get('title', 'Бесплатная демо-открытка')} — NAUM AI Creative Studio\n"
+                    f"Полная версия для печати 300 dpi: /catalog"
+                ),
+            )
+            file_id = str((((resp or {}).get('result') or {}).get('document') or {}).get('file_id') or '')
+            if store is not None and order is not None:
+                store.mark_delivery_sent(order['order_id'], telegram_file_id=file_id)
+            api_fn(
+                cfg.token,
+                'sendMessage',
+                {
+                    'chat_id': chat_id,
+                    'text': (
+                        'Демо-открытка доставлена! Проверьте качество и композицию.\n'
+                        'Хотите полный комплект 150×100 мм (300 dpi) без водяного знака? '
+                        'Откройте /catalog или /start buy_ny-kyiv-01.'
+                    ),
+                },
+            )
+        except Exception as exc:
+            err = _sanitize_error(exc, cfg.token)
+            if store is not None and order is not None:
+                store.mark_delivery_failed(order['order_id'], err)
+            api_fn(
+                cfg.token,
+                'sendMessage',
+                {'chat_id': chat_id, 'text': 'Не удалось отправить демо-комплект. Попробуйте позже или напишите в /support.'},
+            )
+    finally:
+        if tmp_dir_obj is not None:
+            tmp_dir_obj.cleanup()
+
+
 def _handle_catalog_command(
     chat_id: int | str,
     cfg: BotConfig,
     store: StoreDB | None,
     api_fn: Callable[[str, str, dict | None], dict],
 ) -> None:
+    demo_meta = _load_demo_offer(cfg.repo)
+    demo_block = (
+        f"🎁 БЕСПЛАТНО (лид-магнит): {demo_meta.get('title', 'Бесплатная демо-открытка')}\n"
+        f"  Комплект: {demo_meta.get('package_contents', 'демо-открытка ZIP')}\n"
+        f"  Цена: 0 Stars (бесплатно) · Получить: /start {demo_meta.get('deeplink', 'demo_ny')}"
+    )
+
     packages_dir = _resolved_packages_dir(cfg)
     if store is not None:
         ready = [
             p for p in store.list_ready_products()
-            if _safe_package_path(packages_dir, p['product_id']) is not None
+            if p.get('product_id') != DEMO_PRODUCT_ID and _safe_package_path(packages_dir, p['product_id']) is not None
         ]
     else:
         catalog_items, _ = _load_catalog_and_manifest(cfg.repo)
         ready = []
         for x in catalog_items:
             pid = str(x.get('id') or '')
-            if _safe_package_path(packages_dir, pid) is not None:
+            if pid and pid != DEMO_PRODUCT_ID and _safe_package_path(packages_dir, pid) is not None:
                 ready.append(
                     {
                         'product_id': pid,
@@ -537,7 +655,13 @@ def _handle_catalog_command(
             api_fn(
                 cfg.token,
                 'sendMessage',
-                {'chat_id': chat_id, 'text': 'Сейчас нет товаров, открытых для покупки. Проверьте позже или напишите в /support.'},
+                {
+                    'chat_id': chat_id,
+                    'text': (
+                        f'{demo_block}\n\n'
+                        'Платные комплекты пока готовятся к открытию продаж. Попробуйте бесплатное демо или напишите в /support.'
+                    ),
+                },
             )
             return
         lines = [
@@ -549,7 +673,10 @@ def _handle_catalog_command(
         api_fn(
             cfg.token,
             'sendMessage',
-            {'chat_id': chat_id, 'text': 'Готовые комплекты NAUM AI Creative Studio:\n\n' + '\n\n'.join(lines)},
+            {
+                'chat_id': chat_id,
+                'text': f"Каталог NAUM AI Creative Studio:\n\n{demo_block}\n\n" + '\n\n'.join(lines),
+            },
         )
         return
 
@@ -557,7 +684,13 @@ def _handle_catalog_command(
         api_fn(
             cfg.token,
             'sendMessage',
-            {'chat_id': chat_id, 'text': 'Готовые ZIP-комплекты пока на сборке. Следите за обновлениями!'},
+            {
+                'chat_id': chat_id,
+                'text': (
+                    f"{demo_block}\n\n"
+                    "Платные ZIP-комплекты пока на сборке. Попробуйте бесплатное демо прямо сейчас!"
+                ),
+            },
         )
         return
 
@@ -573,6 +706,7 @@ def _handle_catalog_command(
         {
             'chat_id': chat_id,
             'text': (
+                f"{demo_block}\n\n"
                 'Собранные комплекты (оплата Telegram Stars временно в режиме ожидания подтверждения владельцем):\n\n'
                 + '\n\n'.join(lines)
             ),
@@ -778,7 +912,9 @@ def process_update(
 
     if cmd == '/start':
         arg = text.split(maxsplit=1)[1].strip() if ' ' in text else ''
-        if private and arg.startswith('buy_'):
+        if private and arg in ('demo_ny', 'demo-ny'):
+            _handle_demo_command(msg, chat_id, cfg, store, api_fn, send_document_fn)
+        elif private and arg.startswith('buy_'):
             _handle_buy_deeplink(arg[4:].strip(), msg, chat_id, cfg, store, api_fn)
         elif admin:
             api_fn(
@@ -788,7 +924,7 @@ def process_update(
                     'chat_id': chat_id,
                     'text': (
                         'NAUM AI Creative Studio активен. '
-                        'Отправьте фото/документ с подписью ID товара (например: ny-kyiv-01), /items или /refund <order_id>.'
+                        'Отправьте фото/документ с подписью ID товара (например: ny-kyiv-01), /items, /stats или /refund <order_id>.'
                     ),
                 },
             )
@@ -800,6 +936,7 @@ def process_update(
                     'chat_id': chat_id,
                     'text': (
                         f"Здравствуйте! Заявка по NAUM AI Creative Studio ({arg or 'общий запрос'}) принята.\n"
+                        f"Бесплатная демо-открытка: /start demo_ny\n"
                         f"Доступные команды: /catalog, /myorders, /support, /paysupport."
                     ),
                 },
@@ -830,7 +967,7 @@ def process_update(
 
     # Owners in non-private chats (groups/channels) cannot run admin commands or upload assets
     if not private:
-        if cmd in ('/items', '/refund') or (file_id and caption):
+        if cmd in ('/items', '/refund', '/stats') or (file_id and caption):
             api_fn(
                 cfg.token,
                 'sendMessage',
@@ -845,6 +982,27 @@ def process_update(
         cat = json.loads((cfg.repo / 'catalog.json').read_text(encoding='utf-8'))
         lines = [f"• {x['id']} — {x['title']} [{x.get('status', 'черновик')}]" for x in cat.get('items', [])]
         api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': 'Товары:\n' + '\n'.join(lines)})
+        return
+
+    if cmd == '/stats':
+        if store is None:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': 'Метрики недоступны: база магазина не настроена.'})
+            return
+        m = store.get_metrics_summary()
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {
+                'chat_id': chat_id,
+                'text': (
+                    'Метрики NAUM AI Creative Studio:\n'
+                    f"• Лид-магнит (demo_ny): {m['demo_deliveries_sent']} выдач / {m['demo_unique_leads']} уник. лидов (повторов: {m['demo_repeat_requests']})\n"
+                    f"• Платные заказы: {m['paid_orders']} | Выручка: {m['paid_revenue_xtr']} XTR | Доставок: {m['paid_deliveries_sent']}\n"
+                    f"• Конверсия демо → покупка: {m['demo_to_paid_conversion_pct']}%\n"
+                    f"• Открытые тикеты: {m['open_support_tickets']}"
+                ),
+            },
+        )
         return
 
     if cmd == '/refund':

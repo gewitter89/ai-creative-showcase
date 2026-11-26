@@ -1,6 +1,16 @@
 {
   "studio": "NAUM AI Creative Studio",
   "telegram_contact": "https://t.me/NaumCreativeStudioBot",
+  "demo_offer": {
+    "id": "demo-ny",
+    "deeplink": "demo_ny",
+    "title": "Бесплатная демо-открытка «Киев в новогодних огнях»",
+    "description": "Ознакомительный ZIP-комплект (лид-магнит) с пометкой DEMO для проверки качества перед покупкой.",
+    "package_contents": "ZIP-комплект (4 файла): demo_greeting_ua.png (1200×800), demo_ny_kyiv.jpg (1200×800), README.txt, LICENSE.txt",
+    "image": "assets/newyear/ny-kyiv-01/preview.webp",
+    "price_uah": 0,
+    "price_xtr": 0
+  },
   "items": [
     {
       "id": "ny-kyiv-01",

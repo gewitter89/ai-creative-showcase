@@ -42,6 +42,7 @@ def store_env(tmp_path: Path):
             item['badge'] = 'Готов к продаже'
     (repo / 'catalog.json').write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding='utf-8')
     shutil.copy2(root / 'generation_manifest.json', repo / 'generation_manifest.json')
+    shutil.copytree(root / 'assets', repo / 'assets')
 
     packages_dir = tmp_path / 'packages'
     _make_zip(packages_dir / 'ny-kyiv-01.zip', b'kyiv-package')
@@ -443,3 +444,124 @@ def test_send_telegram_document_multipart_upload(tmp_path: Path, monkeypatch):
     assert 'multipart/form-data; boundary=' in captured['content_type']
     assert b'filename="ny-kyiv-01.zip"' in captured['body']
     assert b'Test ZIP' in captured['body']
+
+
+def test_demo_ny_lead_magnet_in_catalog_free_delivery_and_metrics(store_env):
+    cfg, db_path, packages_dir = store_env
+    paused_cfg = studio_bot.BotConfig(
+        token=cfg.token,
+        owner_ids=cfg.owner_ids,
+        repo=cfg.repo,
+        private_dir=cfg.private_dir,
+        auto_push=False,
+        db_path=cfg.db_path,
+        packages_dir=cfg.packages_dir,
+        payments_enabled=False,
+    )
+    calls = []
+    sent_docs = []
+
+    def fake_api(token, method, payload=None):
+        calls.append((method, payload))
+        return {'ok': True}
+
+    def fake_send_doc(token, chat_id, file_path, caption=''):
+        sent_docs.append((chat_id, Path(file_path), caption))
+        return {'ok': True, 'result': {'document': {'file_id': 'tg_demo_file_1'}}}
+
+    # 1. /catalog always shows the free demo lead magnet even when payments_enabled=False
+    studio_bot.process_update(
+        {
+            'update_id': 500,
+            'message': {
+                'from': {'id': 888001, 'username': 'lead1'},
+                'chat': {'id': 888001, 'type': 'private'},
+                'text': '/catalog',
+            },
+        },
+        paused_cfg,
+        api_fn=fake_api,
+    )
+    assert '/start demo_ny' in calls[-1][1]['text']
+    assert '0 Stars' in calls[-1][1]['text']
+
+    # 2. /start demo_ny builds & delivers demo-ny.zip without payment and records SQLite rows
+    studio_bot.process_update(
+        {
+            'update_id': 501,
+            'message': {
+                'from': {'id': 888001, 'username': 'lead1'},
+                'chat': {'id': 888001, 'type': 'private'},
+                'text': '/start demo_ny',
+            },
+        },
+        paused_cfg,
+        api_fn=fake_api,
+        send_document_fn=fake_send_doc,
+    )
+    assert len(sent_docs) == 1
+    assert sent_docs[0][0] == 888001
+    assert sent_docs[0][1] == (packages_dir / 'demo-ny.zip').resolve()
+    assert (packages_dir / 'demo-ny.zip').is_file()
+    assert 'Демо-открытка доставлена' in calls[-1][1]['text']
+
+    # 3. Repeat /start demo_ny by same user is idempotent (no duplicate send, logged in audit_events)
+    studio_bot.process_update(
+        {
+            'update_id': 502,
+            'message': {
+                'from': {'id': 888001, 'username': 'lead1'},
+                'chat': {'id': 888001, 'type': 'private'},
+                'text': '/start demo_ny',
+            },
+        },
+        paused_cfg,
+        api_fn=fake_api,
+        send_document_fn=fake_send_doc,
+    )
+    assert len(sent_docs) == 1
+    assert 'уже получили бесплатную демо-открытку' in calls[-1][1]['text']
+
+    with sqlite3.connect(str(db_path)) as conn:
+        deliv = conn.execute(
+            "SELECT product_id, status, telegram_file_id FROM deliveries WHERE user_id = '888001'"
+        ).fetchall()
+        assert deliv == [('demo-ny', 'sent', 'tg_demo_file_1')]
+        audits = [
+            r[0]
+            for r in conn.execute(
+                "SELECT event_type FROM audit_events WHERE actor_id = '888001' ORDER BY id"
+            ).fetchall()
+        ]
+        assert audits == ['demo_requested', 'delivery_sent', 'demo_repeat_requested']
+
+    # 4. /stats is owner-only in private chat and reflects demo metrics
+    before = len(calls)
+    studio_bot.process_update(
+        {
+            'update_id': 503,
+            'message': {
+                'from': {'id': 888001},
+                'chat': {'id': 888001, 'type': 'private'},
+                'text': '/stats',
+            },
+        },
+        paused_cfg,
+        api_fn=fake_api,
+    )
+    assert len(calls) == before
+
+    studio_bot.process_update(
+        {
+            'update_id': 504,
+            'message': {
+                'from': {'id': 111222},
+                'chat': {'id': 111222, 'type': 'private'},
+                'text': '/stats',
+            },
+        },
+        paused_cfg,
+        api_fn=fake_api,
+    )
+    stats_text = calls[-1][1]['text']
+    assert '1 выдач / 1 уник. лидов (повторов: 1)' in stats_text

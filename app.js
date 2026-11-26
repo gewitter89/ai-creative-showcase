@@ -39,6 +39,34 @@ function buildDeepLink(contact, itemId) {
   return `${contact}?start=${encodeURIComponent(`buy_${itemId}`)}`;
 }
 
+function buildDemoLink(contact, deeplink) {
+  const param = typeof deeplink === 'string' && /^[a-z0-9_-]{1,64}$/.test(deeplink) ? deeplink : 'demo_ny';
+  return contact ? `${contact}?start=${encodeURIComponent(param)}` : '#';
+}
+
+function renderDemoBanner(contact) {
+  const banner = document.getElementById('demo-banner');
+  if (!banner) return;
+  const demo = catalog.demo_offer;
+  if (!demo || !contact) {
+    banner.hidden = true;
+    banner.innerHTML = '';
+    return;
+  }
+  const href = buildDemoLink(contact, demo.deeplink);
+  banner.hidden = false;
+  banner.innerHTML = `
+    <div class="demo-info">
+      <span class="demo-pill">Бесплатно · 0 Stars</span>
+      <div>
+        <strong>${escapeHtml(demo.title || 'Бесплатная демо-открытка')}</strong>
+        <p class="demo-desc">${escapeHtml(demo.description || '')}</p>
+      </div>
+    </div>
+    <a class="btn primary" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Забрать демо в боте</a>
+  `;
+}
+
 function badgeMeta(status, packageReady) {
   if (status === 'готов к продаже' && packageReady) {
     return { label: 'Готов к продаже', cls: 'badge-ready' };
@@ -56,6 +84,7 @@ function render() {
   const queryEl = document.getElementById('q');
   const q = (queryEl ? queryEl.value : '').trim().toLowerCase();
   const contact = telegramContact(catalog.telegram_contact);
+  renderDemoBanner(contact);
   const topLink = document.getElementById('tg-top');
   if (topLink) {
     topLink.hidden = !contact;

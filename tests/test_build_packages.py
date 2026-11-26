@@ -9,7 +9,15 @@ from PIL import Image
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from build_packages import P0_POSTCARD_IDS, PRINT_SIZE_PX, SOCIAL_SIZE_PX, build_all_p0_postcards, build_postcard_package
+from build_packages import (
+    DEMO_PRODUCT_ID,
+    P0_POSTCARD_IDS,
+    PRINT_SIZE_PX,
+    SOCIAL_SIZE_PX,
+    build_all_p0_postcards,
+    build_demo_postcard_package,
+    build_postcard_package,
+)
 from ingest_asset import sha256_file
 
 
@@ -124,3 +132,33 @@ def test_build_package_verifies_sha256_and_supports_versioned_originals(populate
     # Reject unknown/non-P0 IDs
     with pytest.raises(ValueError, match='Unsupported postcard'):
         build_postcard_package(repo, 'ps-pack-01', originals_dir=originals, output_dir=packages)
+
+
+def test_build_demo_postcard_package_uses_public_preview(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    out_dir = tmp_path / 'packages'
+    res = build_demo_postcard_package(repo_root, output_dir=out_dir)
+
+    assert res['ok'] is True
+    assert res['is_demo'] is True
+    assert res['item_id'] == DEMO_PRODUCT_ID
+    zip_path = Path(res['package_path'])
+    assert zip_path.is_file()
+    assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        assert set(zf.namelist()) == {
+            'demo_greeting_ua.png',
+            'demo_ny_kyiv.jpg',
+            'README.txt',
+            'LICENSE.txt',
+        }
+        with Image.open(io.BytesIO(zf.read('demo_greeting_ua.png'))) as g_img:
+            assert g_img.size == SOCIAL_SIZE_PX
+            assert g_img.format == 'PNG'
+        with Image.open(io.BytesIO(zf.read('demo_ny_kyiv.jpg'))) as j_img:
+            assert j_img.size == SOCIAL_SIZE_PX
+            assert j_img.format == 'JPEG'
+        readme = zf.read('README.txt').decode('utf-8')
+        assert 'NaumCreativeStudioBot' in readme
+        assert 'buy_ny-kyiv-01' in readme
