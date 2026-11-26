@@ -617,6 +617,37 @@ class StoreDB:
             row = conn.execute('SELECT * FROM deliveries WHERE order_id = ?', (order_id,)).fetchone()
             return dict(row) if row else None
 
+    def reserve_paid_delivery(self, order: dict, version: dict) -> bool:
+        """Claim one upload attempt durably; existing rows require reconciliation."""
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            cur = conn.execute(
+                """
+                INSERT INTO deliveries (
+                    order_id, user_id, product_id, package_path, package_sha256, status, created_at
+                )
+                SELECT o.order_id, o.user_id, o.product_id, v.package_path,
+                       v.package_sha256, 'sending', ?
+                FROM orders o JOIN product_versions v
+                  ON v.product_id = o.product_id AND v.version = o.product_version
+                WHERE o.order_id = ? AND o.user_id = ? AND o.chat_id = ?
+                  AND o.product_id = ? AND o.product_version = ? AND o.status = 'paid'
+                  AND v.package_path = ? AND v.package_sha256 = ? AND v.package_bytes = ?
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.order_id
+                              AND p.user_id = o.user_id AND p.status = 'paid'
+                              AND p.currency = o.currency AND p.total_amount = o.amount_xtr)
+                ON CONFLICT(order_id) DO NOTHING
+                """,
+                (utc_now_iso(), order['order_id'], str(order['user_id']), str(order['chat_id']),
+                 order['product_id'], order['product_version'], version['package_path'],
+                 version['package_sha256'], version['package_bytes']),
+            )
+            if cur.rowcount != 1:
+                return False
+            self._log_audit_conn(conn, 'delivery_reserved', actor_id=str(order['user_id']),
+                                 order_id=order['order_id'], product_id=order['product_id'])
+            return True
+
     def create_or_get_delivery(self, order: dict, package_path: Path, package_sha256: str) -> dict:
         """Create a pending delivery record if missing, or return existing delivery record."""
         now = utc_now_iso()
