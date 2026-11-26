@@ -1,6 +1,6 @@
 {
   "studio": "NAUM AI Creative Studio",
-  "telegram_contact": "https://t.me/",
+  "telegram_contact": "",
   "items": [
     {
       "id": "ny-kyiv-01",
@@ -11,7 +11,8 @@
       "format": "PNG / JPG · 3:2",
       "price_uah": 149,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "ny-cozy-02",
@@ -22,7 +23,8 @@
       "format": "PNG / JPG · 3:2",
       "price_uah": 129,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "ny-minimal-03",
@@ -33,7 +35,8 @@
       "format": "PNG / JPG · 3:2",
       "price_uah": 99,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "ps-pack-01",
@@ -44,7 +47,8 @@
       "format": "6 PNG · чёрный фон / Screen",
       "price_uah": 199,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "ps-snow-02",
@@ -55,7 +59,8 @@
       "format": "6 PNG · чёрный фон / Screen",
       "price_uah": 169,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "ps-bg-03",
@@ -66,7 +71,8 @@
       "format": "4 JPG / PNG · 4:5",
       "price_uah": 199,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "3d-ref-01",
@@ -77,7 +83,8 @@
       "format": "3 PNG · референсы",
       "price_uah": 149,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "3d-tree-02",
@@ -88,7 +95,8 @@
       "format": "3 PNG · референсы",
       "price_uah": 129,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     },
     {
       "id": "3d-owl-03",
@@ -99,7 +107,8 @@
       "format": "3 PNG · референсы",
       "price_uah": 149,
       "image": "",
-      "badge": "В разработке"
+      "badge": "В разработке",
+      "status": "черновик"
     }
   ]
 }
