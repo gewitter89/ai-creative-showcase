@@ -58,7 +58,9 @@
       "preview_path": "assets/photoshop/ps-bg-03/preview.webp",
       "delivery_requirements": "4 фона: VARIANT = matte midnight blue platform with subtle frost; ivory snow-textured tabletop and warm champagne bokeh; dark pine-green backdrop with elegant fir sprigs at edges; burgundy velvet backdrop with subtle warm light. Целевой размер 2400×3000 px или максимально качественный исходник. Пакет растровый, не PSD.",
       "prompt": "Create ONE original premium winter product-photography background, [VARIANT], portrait 4:5. A clean empty central area and foreground suitable for placing a product later, sophisticated editorial lighting, physically plausible materials, refined minimal composition, subtle seasonal elements at the edges, no products, people, letters, watermarks, logos, or mockup frame. Render one background at a time, no collage.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "fd9cb001a749165a5a46b5bff0c9bc2dfb30a3323028685cbe0e362b68ccb3fe",
+      "original_dimensions": "1122x1402"
     },
     {
       "id": "3d-ref-01",
