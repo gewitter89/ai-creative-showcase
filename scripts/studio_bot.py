@@ -39,9 +39,18 @@ def main() -> None:
                 msg = upd.get('message') or {}
                 uid = str((msg.get('from') or {}).get('id') or '')
                 chat_id = (msg.get('chat') or {}).get('id')
-                if not chat_id or (allowed and uid not in allowed):
+                if not chat_id:
                     continue
                 text = (msg.get('text') or '').strip()
+                if text.startswith('/start'):
+                    arg = text.split(maxsplit=1)[1] if ' ' in text else ''
+                    if not allowed or uid in allowed:
+                        api_call(token, 'sendMessage', {'chat_id': chat_id, 'text': 'NAUM AI Creative Studio активен. Отправьте фото/документ с подписью ID товара (например: ny-kyiv-01) или /items.'})
+                    else:
+                        api_call(token, 'sendMessage', {'chat_id': chat_id, 'text': f'Здравствуйте! Заявка по NAUM AI Creative Studio ({arg or "общий запрос"}) принята. Оставьте ваш контакт или напишите детали.'})
+                    continue
+                if allowed and uid not in allowed:
+                    continue
                 if text == '/items':
                     cat = json.loads((repo / 'catalog.json').read_text(encoding='utf-8'))
                     lines = [f"• {x['id']} — {x['title']} [{x.get('status','черновик')}]" for x in cat.get('items', [])]
