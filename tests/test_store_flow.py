@@ -152,8 +152,11 @@ def test_full_stars_purchase_idempotency_delivery_support_and_refund(store_env):
         api_calls.append((method, payload))
         return {'ok': True}
 
+    sent_bytes = []
+
     def fake_send_doc(token, chat_id, file_path, caption=''):
         sent_docs.append((chat_id, Path(file_path), caption))
+        sent_bytes.append(Path(file_path).read_bytes())
         return {'ok': True, 'result': {'document': {'file_id': 'tg_zip_file_123'}}}
 
     # 1. Deep link /start buy_ny-kyiv-01 sends XTR invoice
@@ -227,7 +230,10 @@ def test_full_stars_purchase_idempotency_delivery_support_and_refund(store_env):
     studio_bot.process_update(payment_upd, cfg, api_fn=fake_api, send_document_fn=fake_send_doc)
     assert len(sent_docs) == 1
     assert sent_docs[0][0] == 555001
-    assert sent_docs[0][1] == (packages_dir / 'ny-kyiv-01.zip').resolve()
+    assert sent_docs[0][1].name == 'ny-kyiv-01.zip'
+    assert sent_docs[0][1] != (packages_dir / 'ny-kyiv-01.zip').resolve()
+    assert not sent_docs[0][1].exists()
+    assert sent_bytes == [(packages_dir / 'ny-kyiv-01.zip').read_bytes()]
     assert order_id in sent_docs[0][2]
 
     # 5. Idempotency: same update_id AND new update_id with same charge_id must NOT re-deliver
