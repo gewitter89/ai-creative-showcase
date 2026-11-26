@@ -1,0 +1,729 @@
+#!/usr/bin/env python3
+"""SQLite persistence and audit layer for NAUM AI Creative Studio store."""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ingest_asset import sha256_file
+
+DEFAULT_DB_PATH = '/var/lib/naum-studio/store.db'
+DB_FILE_MODE = 0o600
+VALID_STATUSES = frozenset({'черновик', 'проверка качества', 'готов к продаже'})
+ACTIVE_ORDER_STATUSES = frozenset({'created', 'invoice_sent', 'pre_checkout_ok'})
+
+
+def utc_now_iso() -> str:
+    """Return current UTC timestamp in ISO-8601 format."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+class StoreDB:
+    """Thread-safe / single-process SQLite store for products, orders, Stars payments, and deliveries."""
+
+    def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+        self.db_path = Path(db_path)
+
+    def _connect(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA journal_mode=WAL;')
+        conn.execute('PRAGMA foreign_keys=ON;')
+        return conn
+
+    def init_schema(self) -> None:
+        """Create all required tables and indexes, enforcing restrictive file permissions."""
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS products (
+                    product_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    package_contents TEXT NOT NULL DEFAULT '',
+                    price_uah INTEGER NOT NULL DEFAULT 0,
+                    price_xtr INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'проверка качества',
+                    package_ready INTEGER NOT NULL DEFAULT 0,
+                    package_path TEXT NOT NULL DEFAULT '',
+                    package_sha256 TEXT NOT NULL DEFAULT '',
+                    package_bytes INTEGER NOT NULL DEFAULT 0,
+                    active_version INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS product_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id TEXT NOT NULL REFERENCES products(product_id),
+                    version INTEGER NOT NULL,
+                    package_path TEXT NOT NULL,
+                    package_sha256 TEXT NOT NULL,
+                    package_bytes INTEGER NOT NULL,
+                    original_sha256 TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(product_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    product_id TEXT NOT NULL REFERENCES products(product_id),
+                    product_version INTEGER NOT NULL DEFAULT 1,
+                    amount_xtr INTEGER NOT NULL,
+                    currency TEXT NOT NULL DEFAULT 'XTR',
+                    invoice_payload TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id TEXT NOT NULL REFERENCES orders(order_id),
+                    user_id TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    total_amount INTEGER NOT NULL,
+                    invoice_payload TEXT NOT NULL,
+                    telegram_payment_charge_id TEXT NOT NULL UNIQUE,
+                    provider_payment_charge_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    refunded_at TEXT,
+                    refunded_by TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id TEXT NOT NULL UNIQUE REFERENCES orders(order_id),
+                    user_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    package_path TEXT NOT NULL,
+                    package_sha256 TEXT NOT NULL,
+                    telegram_file_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '',
+                    delivered_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS support_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    ticket_type TEXT NOT NULL,
+                    order_id TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS processed_updates (
+                    update_id INTEGER PRIMARY KEY,
+                    update_type TEXT NOT NULL DEFAULT '',
+                    processed_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    actor_id TEXT NOT NULL DEFAULT '',
+                    order_id TEXT NOT NULL DEFAULT '',
+                    product_id TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
+                CREATE INDEX IF NOT EXISTS idx_audit_order_id ON audit_events(order_id);
+                """
+            )
+        if self.db_path.exists():
+            os.chmod(self.db_path, DB_FILE_MODE)
+
+    def _log_audit_conn(
+        self,
+        conn: sqlite3.Connection,
+        event_type: str,
+        actor_id: str = '',
+        order_id: str = '',
+        product_id: str = '',
+        details: dict | None = None,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO audit_events (event_type, actor_id, order_id, product_id, details_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_type,
+                str(actor_id),
+                str(order_id),
+                str(product_id),
+                json.dumps(details or {}, ensure_ascii=False),
+                utc_now_iso(),
+            ),
+        )
+
+    def log_audit(
+        self,
+        event_type: str,
+        actor_id: str = '',
+        order_id: str = '',
+        product_id: str = '',
+        details: dict | None = None,
+    ) -> None:
+        """Persist an audit event row."""
+        with self._connect() as conn:
+            self._log_audit_conn(conn, event_type, actor_id, order_id, product_id, details)
+
+    def sync_catalog(
+        self,
+        catalog_items: list[dict],
+        packages_dir: Path,
+        manifest_items: list[dict] | None = None,
+    ) -> int:
+        """Synchronize products and package versions from catalog.json and packages directory."""
+        manifest_by_id = {
+            str(m.get('id')): m for m in (manifest_items or []) if isinstance(m, dict) and m.get('id')
+        }
+        now = utc_now_iso()
+        synced = 0
+
+        with self._connect() as conn:
+            for item in catalog_items:
+                product_id = str(item.get('id') or '').strip()
+                if not product_id:
+                    continue
+                category = str(item.get('category') or 'misc').strip()
+                title = str(item.get('title') or product_id).strip()
+                description = str(item.get('description') or '').strip()
+                package_contents = str(item.get('package_contents') or item.get('format') or '').strip()
+                price_uah = int(item.get('price_uah') or 0)
+                price_xtr = int(item.get('price_xtr') or price_uah or 0)
+                status = str(item.get('status') or 'проверка качества').strip()
+                if status not in VALID_STATUSES:
+                    status = 'черновик'
+
+                zip_path = packages_dir / f'{product_id}.zip'
+                package_ready = 1 if zip_path.is_file() else 0
+                pkg_sha256 = sha256_file(zip_path) if package_ready else ''
+                pkg_bytes = zip_path.stat().st_size if package_ready else 0
+                pkg_path_str = str(zip_path) if package_ready else ''
+
+                existing = conn.execute(
+                    'SELECT active_version FROM products WHERE product_id = ?',
+                    (product_id,),
+                ).fetchone()
+                active_version = int(existing['active_version']) if existing else 0
+
+                conn.execute(
+                    """
+                    INSERT INTO products (
+                        product_id, category, title, description, package_contents,
+                        price_uah, price_xtr, status, package_ready, package_path,
+                        package_sha256, package_bytes, active_version, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(product_id) DO UPDATE SET
+                        category = excluded.category,
+                        title = excluded.title,
+                        description = excluded.description,
+                        package_contents = excluded.package_contents,
+                        price_uah = excluded.price_uah,
+                        price_xtr = excluded.price_xtr,
+                        status = excluded.status,
+                        package_ready = excluded.package_ready,
+                        package_path = excluded.package_path,
+                        package_sha256 = excluded.package_sha256,
+                        package_bytes = excluded.package_bytes,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        product_id,
+                        category,
+                        title,
+                        description,
+                        package_contents,
+                        price_uah,
+                        price_xtr,
+                        status,
+                        package_ready,
+                        pkg_path_str,
+                        pkg_sha256,
+                        pkg_bytes,
+                        active_version,
+                        now,
+                    ),
+                )
+
+                if package_ready and pkg_sha256:
+                    ver_row = conn.execute(
+                        """
+                        SELECT version FROM product_versions
+                        WHERE product_id = ? AND package_sha256 = ?
+                        """,
+                        (product_id, pkg_sha256),
+                    ).fetchone()
+                    if ver_row:
+                        new_ver = int(ver_row['version'])
+                    else:
+                        max_row = conn.execute(
+                            'SELECT COALESCE(MAX(version), 0) AS max_v FROM product_versions WHERE product_id = ?',
+                            (product_id,),
+                        ).fetchone()
+                        new_ver = int(max_row['max_v']) + 1
+                        orig_sha = str((manifest_by_id.get(product_id) or {}).get('original_sha256') or '')
+                        conn.execute(
+                            """
+                            INSERT INTO product_versions (
+                                product_id, version, package_path, package_sha256,
+                                package_bytes, original_sha256, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (product_id, new_ver, pkg_path_str, pkg_sha256, pkg_bytes, orig_sha, now),
+                        )
+                    conn.execute(
+                        'UPDATE products SET active_version = ? WHERE product_id = ?',
+                        (new_ver, product_id),
+                    )
+                synced += 1
+        return synced
+
+    def get_product(self, product_id: str) -> dict | None:
+        """Return a single product row as dict or None."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM products WHERE product_id = ?', (product_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_ready_products(self) -> list[dict]:
+        """Return products that have a built ZIP package on disk."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                'SELECT * FROM products WHERE package_ready = 1 ORDER BY rowid ASC'
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_update_processed(self, update_id: int, update_type: str = '') -> bool:
+        """Record Telegram update_id atomically. Returns False if update_id was already processed."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO processed_updates (update_id, update_type, processed_at)
+                VALUES (?, ?, ?)
+                """,
+                (int(update_id), update_type, utc_now_iso()),
+            )
+            return cur.rowcount == 1
+
+    def create_order(self, user_id: str, chat_id: str, username: str, product: dict) -> dict:
+        """Create a new server-side order for a Telegram Stars checkout."""
+        order_id = f'ord_{uuid.uuid4().hex[:16]}'
+        invoice_payload = f'naum:{order_id}'
+        now = utc_now_iso()
+        amount_xtr = int(product['price_xtr'])
+        if amount_xtr <= 0:
+            raise ValueError(f"Invalid price_xtr for product {product['product_id']}: {amount_xtr}")
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, user_id, chat_id, username, product_id, product_version,
+                    amount_xtr, currency, invoice_payload, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'XTR', ?, 'created', ?, ?)
+                """,
+                (
+                    order_id,
+                    str(user_id),
+                    str(chat_id),
+                    username,
+                    product['product_id'],
+                    int(product.get('active_version') or 1),
+                    amount_xtr,
+                    invoice_payload,
+                    now,
+                    now,
+                ),
+            )
+            self._log_audit_conn(
+                conn,
+                'order_created',
+                actor_id=str(user_id),
+                order_id=order_id,
+                product_id=product['product_id'],
+                details={'amount_xtr': amount_xtr, 'currency': 'XTR'},
+            )
+            row = conn.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row)
+
+    def update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        actor_id: str = '',
+        details: dict | None = None,
+    ) -> None:
+        """Update order status and log audit event."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT product_id FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            product_id = row['product_id'] if row else ''
+            conn.execute(
+                'UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?',
+                (status, utc_now_iso(), order_id),
+            )
+            self._log_audit_conn(
+                conn,
+                f'order_{status}',
+                actor_id=actor_id,
+                order_id=order_id,
+                product_id=product_id,
+                details=details,
+            )
+
+    def get_order(self, order_id: str) -> dict | None:
+        """Fetch an order by order_id."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_order_by_payload(self, invoice_payload: str) -> dict | None:
+        """Fetch an order by invoice_payload."""
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT * FROM orders WHERE invoice_payload = ?',
+                (invoice_payload,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_user_orders(self, user_id: str, limit: int = 10) -> list[dict]:
+        """List recent orders for a buyer joined with product title and delivery status."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    o.*,
+                    COALESCE(p.title, o.product_id) AS product_title,
+                    COALESCE(d.status, '') AS delivery_status
+                FROM orders o
+                LEFT JOIN products p ON p.product_id = o.product_id
+                LEFT JOIN deliveries d ON d.order_id = o.order_id
+                WHERE o.user_id = ?
+                ORDER BY o.created_at DESC, o.rowid DESC
+                LIMIT ?
+                """,
+                (str(user_id), int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def validate_pre_checkout(
+        self,
+        user_id: str,
+        currency: str,
+        total_amount: int,
+        invoice_payload: str,
+        packages_dir: Path,
+        payments_enabled: bool,
+    ) -> tuple[bool, str, dict | None]:
+        """Strictly validate a Telegram pre_checkout_query against server-side order and product state."""
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT * FROM orders WHERE invoice_payload = ?',
+                (invoice_payload,),
+            ).fetchone()
+            order = dict(row) if row else None
+
+            def reject(reason: str) -> tuple[bool, str, dict | None]:
+                self._log_audit_conn(
+                    conn,
+                    'pre_checkout_rejected',
+                    actor_id=str(user_id),
+                    order_id=order['order_id'] if order else '',
+                    product_id=order['product_id'] if order else '',
+                    details={
+                        'reason': reason,
+                        'currency': currency,
+                        'total_amount': total_amount,
+                    },
+                )
+                return False, reason, order
+
+            if not payments_enabled:
+                return reject('Приём платежей временно отключён.')
+            if currency != 'XTR':
+                return reject('Неверная валюта оплаты (ожидается XTR).')
+            if order is None:
+                return reject('Заказ не найден.')
+            if str(user_id) != str(order['user_id']):
+                return reject('Заказ принадлежит другому пользователю.')
+            if int(total_amount) != int(order['amount_xtr']):
+                return reject('Сумма заказа не совпадает.')
+            if order['status'] not in ACTIVE_ORDER_STATUSES:
+                return reject('Заказ уже оплачен или отменён.')
+
+            prod_row = conn.execute(
+                'SELECT * FROM products WHERE product_id = ?',
+                (order['product_id'],),
+            ).fetchone()
+            product = dict(prod_row) if prod_row else None
+            if not product or int(product['package_ready']) != 1 or product['status'] != 'готов к продаже':
+                return reject('Товар временно недоступен для покупки.')
+
+            pkg_path = (packages_dir / f"{product['product_id']}.zip").resolve()
+            if not pkg_path.is_relative_to(packages_dir.resolve()) or not pkg_path.is_file():
+                return reject('Архив товара не найден на сервере.')
+
+            conn.execute(
+                "UPDATE orders SET status = 'pre_checkout_ok', updated_at = ? WHERE order_id = ?",
+                (utc_now_iso(), order['order_id']),
+            )
+            self._log_audit_conn(
+                conn,
+                'pre_checkout_ok',
+                actor_id=str(user_id),
+                order_id=order['order_id'],
+                product_id=order['product_id'],
+                details={'amount_xtr': total_amount, 'currency': currency},
+            )
+            order['status'] = 'pre_checkout_ok'
+            return True, '', order
+
+    def record_successful_payment(
+        self,
+        user_id: str,
+        currency: str,
+        total_amount: int,
+        invoice_payload: str,
+        telegram_charge_id: str,
+        provider_charge_id: str = '',
+    ) -> tuple[str, dict | None]:
+        """Idempotently verify and persist a Telegram Stars successful_payment event."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            existing_pay = conn.execute(
+                'SELECT * FROM payments WHERE telegram_payment_charge_id = ?',
+                (telegram_charge_id,),
+            ).fetchone()
+            if existing_pay:
+                order_row = conn.execute(
+                    'SELECT * FROM orders WHERE order_id = ?',
+                    (existing_pay['order_id'],),
+                ).fetchone()
+                self._log_audit_conn(
+                    conn,
+                    'payment_duplicate_ignored',
+                    actor_id=str(user_id),
+                    order_id=existing_pay['order_id'],
+                    product_id=order_row['product_id'] if order_row else '',
+                    details={'telegram_payment_charge_id': telegram_charge_id},
+                )
+                return 'duplicate_charge', dict(order_row) if order_row else None
+
+            order_row = conn.execute(
+                'SELECT * FROM orders WHERE invoice_payload = ?',
+                (invoice_payload,),
+            ).fetchone()
+            order = dict(order_row) if order_row else None
+
+            if (
+                order is None
+                or currency != 'XTR'
+                or int(total_amount) != int(order['amount_xtr'])
+                or str(user_id) != str(order['user_id'])
+                or order['status'] in ('refunded', 'cancelled')
+            ):
+                self._log_audit_conn(
+                    conn,
+                    'payment_mismatch',
+                    actor_id=str(user_id),
+                    order_id=order['order_id'] if order else '',
+                    product_id=order['product_id'] if order else '',
+                    details={
+                        'currency': currency,
+                        'total_amount': total_amount,
+                        'invoice_payload': invoice_payload,
+                        'telegram_payment_charge_id': telegram_charge_id,
+                    },
+                )
+                return 'mismatch', order
+
+            conn.execute(
+                """
+                INSERT INTO payments (
+                    order_id, user_id, currency, total_amount, invoice_payload,
+                    telegram_payment_charge_id, provider_payment_charge_id, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
+                """,
+                (
+                    order['order_id'],
+                    str(user_id),
+                    currency,
+                    int(total_amount),
+                    invoice_payload,
+                    telegram_charge_id,
+                    provider_charge_id,
+                    now,
+                ),
+            )
+            conn.execute(
+                "UPDATE orders SET status = 'paid', updated_at = ? WHERE order_id = ?",
+                (now, order['order_id']),
+            )
+            self._log_audit_conn(
+                conn,
+                'payment_received',
+                actor_id=str(user_id),
+                order_id=order['order_id'],
+                product_id=order['product_id'],
+                details={
+                    'amount_xtr': total_amount,
+                    'telegram_payment_charge_id': telegram_charge_id,
+                },
+            )
+            order['status'] = 'paid'
+            return 'recorded', order
+
+    def get_payment_by_order(self, order_id: str) -> dict | None:
+        """Return payment row for an order."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM payments WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_delivery_by_order(self, order_id: str) -> dict | None:
+        """Return delivery row for an order."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM deliveries WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def create_or_get_delivery(self, order: dict, package_path: Path, package_sha256: str) -> dict:
+        """Create a pending delivery record if missing, or return existing delivery record."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO deliveries (
+                    order_id, user_id, product_id, package_path, package_sha256, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    order['order_id'],
+                    str(order['user_id']),
+                    order['product_id'],
+                    str(package_path),
+                    package_sha256,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                'SELECT * FROM deliveries WHERE order_id = ?',
+                (order['order_id'],),
+            ).fetchone()
+            return dict(row)
+
+    def mark_delivery_sent(self, order_id: str, telegram_file_id: str = '') -> None:
+        """Mark delivery and order as delivered."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, product_id FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            conn.execute(
+                """
+                UPDATE deliveries
+                SET status = 'sent', telegram_file_id = ?, error = '', delivered_at = ?
+                WHERE order_id = ?
+                """,
+                (telegram_file_id, now, order_id),
+            )
+            conn.execute(
+                "UPDATE orders SET status = 'delivered', updated_at = ? WHERE order_id = ?",
+                (now, order_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'delivery_sent',
+                actor_id=row['user_id'] if row else '',
+                order_id=order_id,
+                product_id=row['product_id'] if row else '',
+                details={'telegram_file_id': telegram_file_id},
+            )
+
+    def mark_delivery_failed(self, order_id: str, error: str) -> None:
+        """Mark delivery and order as failed without losing payment history."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, product_id FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            conn.execute(
+                "UPDATE deliveries SET status = 'failed', error = ? WHERE order_id = ?",
+                (error[:500], order_id),
+            )
+            conn.execute(
+                "UPDATE orders SET status = 'delivery_failed', updated_at = ? WHERE order_id = ?",
+                (now, order_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'delivery_failed',
+                actor_id=row['user_id'] if row else '',
+                order_id=order_id,
+                product_id=row['product_id'] if row else '',
+                details={'error': error[:500]},
+            )
+
+    def mark_refunded(self, order_id: str, admin_id: str) -> None:
+        """Mark payment and order as refunded by an owner."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT product_id FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            conn.execute(
+                """
+                UPDATE payments SET status = 'refunded', refunded_at = ?, refunded_by = ?
+                WHERE order_id = ?
+                """,
+                (now, str(admin_id), order_id),
+            )
+            conn.execute(
+                "UPDATE orders SET status = 'refunded', updated_at = ? WHERE order_id = ?",
+                (now, order_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'payment_refunded',
+                actor_id=str(admin_id),
+                order_id=order_id,
+                product_id=row['product_id'] if row else '',
+                details={'refunded_by': str(admin_id)},
+            )
+
+    def create_support_ticket(
+        self,
+        user_id: str,
+        chat_id: str,
+        ticket_type: str,
+        message: str,
+        order_id: str = '',
+    ) -> int:
+        """Insert a customer support or pay-support ticket and audit event."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO support_tickets (user_id, chat_id, ticket_type, order_id, message, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'open', ?)
+                """,
+                (str(user_id), str(chat_id), ticket_type, order_id, message[:2000], now),
+            )
+            ticket_id = int(cur.lastrowid)
+            self._log_audit_conn(
+                conn,
+                f'ticket_{ticket_type}',
+                actor_id=str(user_id),
+                order_id=order_id,
+                details={'ticket_id': ticket_id},
+            )
+            return ticket_id
