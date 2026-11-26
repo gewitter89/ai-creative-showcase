@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ingest_asset import sha256_file
+from package_version import verified_order_package
 
 DEFAULT_DB_PATH = '/var/lib/naum-studio/store.db'
 DB_FILE_MODE = 0o600
@@ -424,6 +425,15 @@ class StoreDB:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_order_package_version(self, order: dict) -> dict | None:
+        """Read the package identity fixed at order creation, not the active product."""
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT * FROM product_versions WHERE product_id = ? AND version = ?',
+                (order['product_id'], order['product_version']),
+            ).fetchone()
+            return dict(row) if row else None
+
     def validate_pre_checkout(
         self,
         user_id: str,
@@ -477,9 +487,13 @@ class StoreDB:
             if not product or int(product['package_ready']) != 1 or product['status'] != 'готов к продаже':
                 return reject('Товар временно недоступен для покупки.')
 
-            pkg_path = (packages_dir / f"{product['product_id']}.zip").resolve()
-            if not pkg_path.is_relative_to(packages_dir.resolve()) or not pkg_path.is_file():
-                return reject('Архив товара не найден на сервере.')
+            version_row = conn.execute(
+                'SELECT * FROM product_versions WHERE product_id = ? AND version = ?',
+                (order['product_id'], order['product_version']),
+            ).fetchone()
+            version = dict(version_row) if version_row else None
+            if verified_order_package(packages_dir, order, version) is None:
+                return reject('Версия архива изменилась или недоступна. Оформите новый заказ.')
 
             conn.execute(
                 "UPDATE orders SET status = 'pre_checkout_ok', updated_at = ? WHERE order_id = ?",
