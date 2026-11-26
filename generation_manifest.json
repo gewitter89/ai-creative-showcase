@@ -48,7 +48,9 @@
       "preview_path": "assets/photoshop/ps-snow-02/preview.webp",
       "delivery_requirements": "6 отдельных PNG: VARIANT = light fine snow; large soft foreground snowflakes; diagonal windblown snow; delicate flurries; heavy snow with three depth layers; sparse crystalline sparkles. Проверить наложение Screen и отсутствие серой дымки; целевой размер 3000×2000 px только после проверки.",
       "prompt": "Generate ONE photorealistic isolated falling snow overlay on solid pure black RGB 0,0,0. [VARIANT]. Natural varied particle size, controlled density, plausible depth of field, no ground, trees, sky, scenery, letters or branding. Clean black areas without gray haze, horizontal 3:2, no borders or mockup. Output one effect per generation.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "91477e81b7519ad36eba145274e4cb3429d9cd8866945495752bc376be0ce768",
+      "original_dimensions": "1536x1024"
     },
     {
       "id": "ps-bg-03",

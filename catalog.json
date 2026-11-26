@@ -58,9 +58,9 @@
       "description": "Планируемый набор снежных частиц для зимних фотографий, баннеров и обложек. (В разработке.)",
       "format": "6 PNG · чёрный фон / Screen",
       "price_uah": 169,
-      "image": "",
-      "badge": "В разработке",
-      "status": "черновик"
+      "image": "assets/photoshop/ps-snow-02/preview.webp",
+      "badge": "Проверка качества",
+      "status": "проверка качества"
     },
     {
       "id": "ps-bg-03",
