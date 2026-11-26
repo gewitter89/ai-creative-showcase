@@ -34,9 +34,9 @@
       "description": "Минималистичная открытка с золотым праздничным орнаментом на тёмно-зелёном фоне. (В разработке.)",
       "format": "PNG / JPG · 3:2",
       "price_uah": 99,
-      "image": "",
-      "badge": "В разработке",
-      "status": "черновик"
+      "image": "assets/newyear/ny-minimal-03/preview.webp",
+      "badge": "Проверка качества",
+      "status": "проверка качества"
     },
     {
       "id": "ps-pack-01",

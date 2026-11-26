@@ -28,7 +28,9 @@
       "preview_path": "assets/newyear/ny-minimal-03/preview.webp",
       "delivery_requirements": "PNG без текста и JPG с вручную набранным «2027» и поздравлением; 150×100 мм, 300 dpi. Не обещать физическое тиснение или металлизированную печать.",
       "prompt": "Original high-end minimalist New Year postcard background, rich dark evergreen matte paper, one delicate champagne-gold botanical wreath of fir needles and tiny stars, realistic subtle metallic foil appearance, generous clean center for later typography, elegant restrained luxury stationery design, perfect flat front-facing artwork, horizontal 3:2, no text, numbers, logos, watermarks, borders or hands. No mockup, no perspective distortion.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "5761ef44275b379d6a80f4b4000a5820edf03cb7f359806cda9ff64b42652e8a",
+      "original_dimensions": "1536x1024"
     },
     {
       "id": "ps-pack-01",
