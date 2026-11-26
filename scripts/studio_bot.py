@@ -360,10 +360,8 @@ def _handle_successful_payment(
 ) -> None:
     if not is_private_chat(msg):
         return
-    update_id = upd.get('update_id')
-    if isinstance(update_id, int) and not store.mark_update_processed(update_id, 'successful_payment'):
-        return
-
+    # Payment identity, not a precommitted update marker, controls replay.
+    # A crash before receipt commit must permit this update to be processed again.
     sp = msg['successful_payment']
     user_id = get_sender_id(msg)
     currency = str(sp.get('currency') or '').strip()
@@ -380,7 +378,7 @@ def _handle_successful_payment(
         telegram_charge_id=telegram_charge_id,
         provider_charge_id=provider_charge_id,
     )
-    if outcome == 'mismatch' or order is None:
+    if outcome not in ('recorded', 'duplicate_charge') or order is None:
         api_fn(
             cfg.token,
             'sendMessage',
@@ -1038,8 +1036,8 @@ def main() -> None:
         try:
             updates = api_call(cfg.token, f'getUpdates?timeout=25&offset={offset}').get('result', [])
             for upd in updates:
-                offset = upd['update_id'] + 1
                 process_update(upd, cfg)
+                offset = upd['update_id'] + 1
         except Exception:
             time.sleep(5)
 
