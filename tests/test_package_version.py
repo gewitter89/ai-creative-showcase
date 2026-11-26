@@ -1,9 +1,11 @@
 import hashlib
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from package_version import verified_order_package, MAX_PACKAGE_BYTES
 
 
