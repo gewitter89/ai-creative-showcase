@@ -12,6 +12,7 @@ from pathlib import Path
 from PIL import Image
 
 ID_RE = re.compile(r'^[a-z0-9][a-z0-9-]{2,40}$')
+CAT_RE = re.compile(r'^[a-z0-9][a-z0-9-]{1,40}$')
 DEFAULT_PRIVATE_DIR = '/var/lib/naum-studio/originals'
 MAX_PREVIEW_SIDE = 1200
 MIN_IMAGE_SIDE = 512
@@ -58,7 +59,7 @@ def ingest_asset(
 
         # Store original privately outside public repo
         category = str(m_item.get('category') or c_item.get('category') or 'misc')
-        if not ID_RE.fullmatch(category):
+        if not CAT_RE.fullmatch(category):
             raise ValueError(f'Invalid category: {category!r}')
         orig_dir = private_dir / category / item_id
         orig_dir.mkdir(parents=True, exist_ok=True)

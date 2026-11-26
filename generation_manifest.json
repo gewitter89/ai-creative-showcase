@@ -68,7 +68,9 @@
       "preview_path": "assets/3d/3d-ref-01/preview.webp",
       "delivery_requirements": "Три отдельные проекции: VIEW = front; left side; back. После первой генерации использовать её как референс для согласования геометрии следующих ракурсов. PNG 1:1; сверить силуэт и детали. STL/3MF не входит, печатаемость не подтверждена.",
       "prompt": "Create ONE orthographic design-reference image for an original cute small seated dragon collectible figurine intended for later 3D modeling. [VIEW] view. Consistent reference geometry: round head, two short rounded horns, rounded folded wings close to the body, curled thick tail resting on a wide flat circular base, stout limbs, smooth solid surfaces, no thin floating parts, no props. Neutral warm-gray clay material, plain light gray background, even diffuse light, centered, square 1:1. Orthographic view, no wide-angle perspective, no text, labels, logos or watermark. This is concept art, not a printable model.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "b301d9a6fba5da76473f686df80bd341fdc78da40d6c6624939f1ee045175a48",
+      "original_dimensions": "1254x1254"
     },
     {
       "id": "3d-tree-02",
