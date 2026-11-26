@@ -1,0 +1,19 @@
+[Unit]
+Description=NAUM AI Creative Studio Storefront (VPS static allowlisted server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ai-creative-showcase
+Environment=STUDIO_REPO=/opt/ai-creative-showcase
+Environment=STUDIO_WEB_HOST=127.0.0.1
+Environment=STUDIO_WEB_PORT=8090
+ExecStart=/usr/bin/python3 -B /opt/ai-creative-showcase/scripts/serve_storefront.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

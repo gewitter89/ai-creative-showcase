@@ -1,0 +1,11 @@
+# Example Caddy reverse-proxy block for NAUM AI Creative Studio storefront.
+# Add inside your site block in /etc/caddy/Caddyfile (do not overwrite existing routes):
+#
+# handle /studio* {
+#     reverse_proxy 127.0.0.1:8090
+# }
+#
+# Or for a dedicated subdomain:
+# studio.example.com {
+#     reverse_proxy 127.0.0.1:8090
+# }
