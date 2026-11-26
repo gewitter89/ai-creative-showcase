@@ -53,20 +53,26 @@ let cat='all';
 function E(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function render(){
  const q=(document.getElementById('q').value||'').trim().toLowerCase();
- const list=catalog.items.filter(x=>(cat==='all'||x.category===cat)&&(!q||(x.title+' '+x.description).toLowerCase().includes(q)));
- document.getElementById('grid').innerHTML=list.map(x=>`
-  <article class="card">
-   <div class="thumb">${x.image?`<img src="${E(x.image)}" alt="${E(x.title)}">`:`<span>Превью · ${E(x.format)}</span>`}<span class="badge">${E(x.badge||x.format)}</span></div>
+ const list=catalog.items.filter(x=>(cat==='all'||x.category===cat)&&(!q||(x.title+' '+x.description+' '+x.id).toLowerCase().includes(q)));
+ document.getElementById('grid').innerHTML=list.map(x=>{
+  const status=x.status||(x.image?'готов к продаже':'черновик');
+  const ready=status==='готов к продаже'&&Boolean(x.image)&&catalog.telegram_contact&&catalog.telegram_contact!=='https://t.me/';
+  const catNote=x.category==='3d'?' · Графический референс (не STL)':'';
+  const orderHref=ready?(catalog.telegram_contact+(catalog.telegram_contact.includes('?')?'&':'?')+'text='+encodeURIComponent('Заказ товара '+x.id+' ('+x.title+')')):'#';
+  return `
+  <article class="card" data-id="${E(x.id)}">
+   <div class="thumb">${x.image?`<img src="${E(x.image)}" alt="${E(x.title)}">`:`<span>Превью в разработке · ${E(x.format)}</span>`}<span class="badge">${E(status)}</span></div>
    <div class="body">
-    <div class="cat">${E(x.category_label)}</div>
+    <div class="cat">${E(x.category_label)}${E(catNote)}</div>
     <h2 class="title">${E(x.title)}</h2>
     <p class="desc">${E(x.description)}</p>
     <div class="foot">
      <span class="price">${Number(x.price_uah||0)} грн</span>
-     <a class="btn" href="${E(catalog.telegram_contact)}" target="_blank" rel="noopener">Заказать</a>
+     ${ready?`<a class="btn primary" href="${E(orderHref)}" target="_blank" rel="noopener">Заказать (${E(x.id)})</a>`:`<button class="btn" disabled style="opacity:.55;cursor:not-allowed">Недоступно (${E(status)})</button>`}
     </div>
    </div>
-  </article>`).join('')||'<p class="sub">По вашему запросу ничего не найдено.</p>';
+  </article>`;
+ }).join('')||'<p class="sub">По вашему запросу ничего не найдено.</p>';
 }
 document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('[data-cat]').forEach(x=>x.classList.remove('active'));

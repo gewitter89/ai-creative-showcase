@@ -1,0 +1,80 @@
+# NAUM AI Creative Studio — партия 01
+
+Девять концепций товаров. Цены — предложенные стартовые цены, не подтверждённые рынком. Файлы ещё не произведены. Не публиковать карточки как доступные к заказу до проверки результатов и настройки рабочего Telegram-контакта.
+
+## Общий стандарт
+
+Промпты написаны на английском. Генерировать один исходник за вызов; для наборов повторять промпт с указанными вариантами. Нативное разрешение зависит от генератора: не обещать 4K, PSD, STL или прозрачность без фактического файла и проверки. Сохранять оригиналы отдельно от публичных превью. Публичные превью — WebP/JPG, желательно 1200 px по длинной стороне, с сохранением пропорций. Доставляемые файлы не хранить в публичном GitHub Pages. Все тексты открыток добавить вручную и вычитать.
+
+## 1. Киев в новогодних огнях
+**ID:** `ny-kyiv-01` | **Цена:** 149 грн | **Категория:** Новогодние открытки
+**Путь будущего превью:** `assets/newyear/ny-kyiv-01/preview.webp`
+
+Create an original premium winter holiday postcard illustration of Kyiv at blue hour, Maidan Nezalezhnosti with a recognizable Independence Monument and softly lit surrounding buildings, light snowfall, deep midnight blue sky, warm amber Christmas lights, restrained Ukrainian blue and gold accents, elegant festive atmosphere, realistic architectural details, balanced cinematic composition, fine detail but not cluttered, horizontal 3:2 composition, clear open sky for a later greeting. No letters, text, logos, flags with inscriptions, watermarks, frames, or mockup. Do not imitate a particular artist.
+
+**Комплект и контроль качества:** Печатная версия 150×100 мм при 300 dpi: 1772×1181 px или больше при том же отношении сторон; отдельная версия для соцсетей. После генерации добавить «З Новим 2027 роком!» вручную, проверить орфографию.
+
+## 2. Тепло рождественского дома
+**ID:** `ny-cozy-02` | **Цена:** 129 грн | **Категория:** Новогодние открытки
+**Путь будущего превью:** `assets/newyear/ny-cozy-02/preview.webp`
+
+Original luxury Christmas greeting card illustration, close view of a warm wooden window looking onto a snowy quiet village at twilight, softly glowing candles, pine sprigs, red berries, subtle champagne-gold highlights, tactile watercolor and fine paper texture, sophisticated editorial composition, warm cream and forest green palette, horizontal 3:2, generous clean negative space in the upper left for a greeting added later. No typography, no logos, no people, no watermark, no border, no mockup.
+
+**Комплект и контроль качества:** 150×100 мм, 300 dpi (1772×1181 px или больше); отдельный PNG без текста и версия с надписью «З Різдвом Христовим!» после ручной вёрстки.
+
+## 3. Золото зимы — 2027
+**ID:** `ny-minimal-03` | **Цена:** 99 грн | **Категория:** Новогодние открытки
+**Путь будущего превью:** `assets/newyear/ny-minimal-03/preview.webp`
+
+Original high-end minimalist New Year postcard background, rich dark evergreen matte paper, one delicate champagne-gold botanical wreath of fir needles and tiny stars, realistic subtle metallic foil appearance, generous clean center for later typography, elegant restrained luxury stationery design, perfect flat front-facing artwork, horizontal 3:2, no text, numbers, logos, watermarks, borders or hands. No mockup, no perspective distortion.
+
+**Комплект и контроль качества:** PNG без текста и JPG с вручную набранным «2027» и поздравлением; 150×100 мм, 300 dpi. Не обещать физическое тиснение или металлизированную печать.
+
+## 4. Зимний неон — набор световых эффектов
+**ID:** `ps-pack-01` | **Цена:** 199 грн | **Категория:** Для Photoshop
+**Путь будущего превью:** `assets/photoshop/ps-pack-01/preview.webp`
+
+Create ONE isolated photographic light-effect overlay on a perfectly solid pure black RGB 0,0,0 background. The effect is [VARIANT]. Soft realistic luminous glow, clean isolated edges, delicate gradients, no foreground objects, no text, no logos, no watermark, no texture in the black background, horizontal 3:2. Preserve dark background for Photoshop Screen blending. Output one asset per generation, not a contact sheet.
+
+**Комплект и контроль качества:** 6 отдельных PNG (цель 3000×2000 px при сохранении качества): VARIANT = blue diagonal light streak; warm golden bokeh clusters; subtle icy blue edge glow; warm circular lens flare; sparse white sparkling snow dust; violet-blue soft light leak. Проверить чёрный фон, Screen blending в Photoshop; не выдавать чёрный фон за прозрачность.
+
+## 5. Снег в движении — 6 оверлеев
+**ID:** `ps-snow-02` | **Цена:** 169 грн | **Категория:** Для Photoshop
+**Путь будущего превью:** `assets/photoshop/ps-snow-02/preview.webp`
+
+Generate ONE photorealistic isolated falling snow overlay on solid pure black RGB 0,0,0. [VARIANT]. Natural varied particle size, controlled density, plausible depth of field, no ground, trees, sky, scenery, letters or branding. Clean black areas without gray haze, horizontal 3:2, no borders or mockup. Output one effect per generation.
+
+**Комплект и контроль качества:** 6 отдельных PNG: VARIANT = light fine snow; large soft foreground snowflakes; diagonal windblown snow; delicate flurries; heavy snow with three depth layers; sparse crystalline sparkles. Проверить наложение Screen и отсутствие серой дымки; целевой размер 3000×2000 px только после проверки.
+
+## 6. Зимняя студия — 4 премиальных фона
+**ID:** `ps-bg-03` | **Цена:** 199 грн | **Категория:** Для Photoshop
+**Путь будущего превью:** `assets/photoshop/ps-bg-03/preview.webp`
+
+Create ONE original premium winter product-photography background, [VARIANT], portrait 4:5. A clean empty central area and foreground suitable for placing a product later, sophisticated editorial lighting, physically plausible materials, refined minimal composition, subtle seasonal elements at the edges, no products, people, letters, watermarks, logos, or mockup frame. Render one background at a time, no collage.
+
+**Комплект и контроль качества:** 4 фона: VARIANT = matte midnight blue platform with subtle frost; ivory snow-textured tabletop and warm champagne bokeh; dark pine-green backdrop with elegant fir sprigs at edges; burgundy velvet backdrop with subtle warm light. Целевой размер 2400×3000 px или максимально качественный исходник. Пакет растровый, не PSD.
+
+## 7. Дракончик-хранитель — концепт фигурки
+**ID:** `3d-ref-01` | **Цена:** 149 грн | **Категория:** Для 3D-принтера
+**Путь будущего превью:** `assets/3d/3d-ref-01/preview.webp`
+
+Create ONE orthographic design-reference image for an original cute small seated dragon collectible figurine intended for later 3D modeling. [VIEW] view. Consistent reference geometry: round head, two short rounded horns, rounded folded wings close to the body, curled thick tail resting on a wide flat circular base, stout limbs, smooth solid surfaces, no thin floating parts, no props. Neutral warm-gray clay material, plain light gray background, even diffuse light, centered, square 1:1. Orthographic view, no wide-angle perspective, no text, labels, logos or watermark. This is concept art, not a printable model.
+
+**Комплект и контроль качества:** Три отдельные проекции: VIEW = front; left side; back. После первой генерации использовать её как референс для согласования геометрии следующих ракурсов. PNG 1:1; сверить силуэт и детали. STL/3MF не входит, печатаемость не подтверждена.
+
+## 8. Ёлка Nordic — концепт декора
+**ID:** `3d-tree-02` | **Цена:** 129 грн | **Категория:** Для 3D-принтера
+**Путь будущего превью:** `assets/3d/3d-tree-02/preview.webp`
+
+Create ONE orthographic design-reference image for an original minimalist Nordic-style tabletop Christmas tree object. [VIEW] view. Consistent geometry: three broad stacked rounded conical tiers, smooth scalloped edges, one thick integrated rounded star at the top, wide flat circular base, single solid-looking silhouette without detached decorations, muted monochrome clay render on a plain light-gray background, diffuse studio light, centered 1:1, orthographic, no text, branding, dimensions or watermark. This is reference art, not a verified 3D printable mesh.
+
+**Комплект и контроль качества:** Три PNG: front / left side / back. Использовать первое изображение как референс для следующих ракурсов. STL/3MF не входит; фактическая геометрия и печать требуют отдельного моделирования и проверки.
+
+## 9. Зимняя сова — концепт фигурки
+**ID:** `3d-owl-03` | **Цена:** 149 грн | **Категория:** Для 3D-принтера
+**Путь будущего превью:** `assets/3d/3d-owl-03/preview.webp`
+
+Create ONE orthographic design-reference image for an original small adorable winter owl figurine with a thick integrated scarf. [VIEW] view. Consistent silhouette: plump rounded body, two recessed round eyes, tiny rounded beak, wings merged into sides, scarf wraps the neck with short rounded ends attached to body, wide flat oval base, no loose or fragile details. Monochrome gray clay render, plain neutral background, soft even light, centered 1:1, orthographic, no text, logos or watermark. Concept only, not a printable model.
+
+**Комплект и контроль качества:** Три PNG: front / left side / back. Сохранять геометрию и пропорции по первому референсу. Без STL/3MF, без обещания печатаемости.
+
