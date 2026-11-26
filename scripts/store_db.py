@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ingest_asset import sha256_file
-from package_version import verified_order_package
+from package_version import verified_order_package, retain_catalog_package
 
 DEFAULT_DB_PATH = '/var/lib/naum-studio/store.db'
 DB_FILE_MODE = 0o600
@@ -215,11 +215,11 @@ class StoreDB:
                 if status not in VALID_STATUSES:
                     status = 'черновик'
 
-                zip_path = packages_dir / f'{product_id}.zip'
-                package_ready = 1 if zip_path.is_file() else 0
-                pkg_sha256 = sha256_file(zip_path) if package_ready else ''
-                pkg_bytes = zip_path.stat().st_size if package_ready else 0
-                pkg_path_str = str(zip_path) if package_ready else ''
+                retained = retain_catalog_package(packages_dir, product_id)
+                package_ready = int(retained is not None)
+                pkg_sha256 = retained['package_sha256'] if retained else ''
+                pkg_bytes = retained['package_bytes'] if retained else 0
+                pkg_path_str = retained['package_path'] if retained else ''
 
                 existing = conn.execute(
                     'SELECT active_version FROM products WHERE product_id = ?',
@@ -269,13 +269,23 @@ class StoreDB:
                 if package_ready and pkg_sha256:
                     ver_row = conn.execute(
                         """
-                        SELECT version FROM product_versions
+                        SELECT version, package_bytes FROM product_versions
                         WHERE product_id = ? AND package_sha256 = ?
+                        ORDER BY version LIMIT 1
                         """,
                         (product_id, pkg_sha256),
                     ).fetchone()
                     if ver_row:
                         new_ver = int(ver_row['version'])
+                        if int(ver_row['package_bytes']) != pkg_bytes:
+                            conn.execute('UPDATE products SET package_ready = 0 WHERE product_id = ?', (product_id,))
+                            synced += 1
+                            continue
+                        # Upgrade an existing matching legacy row to the retained copy.
+                        conn.execute(
+                            'UPDATE product_versions SET package_path = ? WHERE product_id = ? AND version = ? AND package_sha256 = ? AND package_bytes = ?',
+                            (pkg_path_str, product_id, new_ver, pkg_sha256, pkg_bytes),
+                        )
                     else:
                         max_row = conn.execute(
                             'SELECT COALESCE(MAX(version), 0) AS max_v FROM product_versions WHERE product_id = ?',
