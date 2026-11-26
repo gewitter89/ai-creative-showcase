@@ -14,6 +14,7 @@ h1{margin:0;font-size:24px}
 .sub{color:var(--muted);font-size:14px;margin:4px 0 0}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}
 .btn{border:1px solid var(--border);background:var(--card);color:var(--text);padding:8px 14px;border-radius:10px;cursor:pointer;font-size:14px;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.btn[hidden]{display:none}
 .btn.active,.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .search{flex:1;min-width:200px;padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:14px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
@@ -36,7 +37,7 @@ h1{margin:0;font-size:24px}
    <h1>NAUM AI Creative Studio</h1>
    <p class="sub">Новогодние открытки, ассеты для Photoshop и концепты для 3D-принтеров</p>
   </div>
-  <a id="tg-top" class="btn primary" href="https://t.me/" target="_blank" rel="noopener">Заказать в Telegram</a>
+  <a id="tg-top" class="btn primary" hidden target="_blank" rel="noopener noreferrer">Связаться в Telegram</a>
  </header>
  <div class="filters">
   <button class="btn active" data-cat="all">Все работы</button>
@@ -50,18 +51,30 @@ h1{margin:0;font-size:24px}
 <script>
 let catalog={items:[],telegram_contact:'https://t.me/'};
 let cat='all';
+function telegramContact(value){
+ return typeof value==='string'&&/^https:\/\/t\.me\/[A-Za-z][A-Za-z0-9_]{4,31}\/?$/.test(value)?value.replace(/\/$/,''):'';
+}
+function previewPath(x){
+ if(!['newyear','photoshop','3d'].includes(x.category)||typeof x.id!=='string'||!/^[a-z0-9-]{1,64}$/.test(x.id))return '';
+ return x.image==='assets/'+x.category+'/'+x.id+'/preview.webp'?x.image:'';
+}
+function productStatus(x){
+ return ['черновик','проверка качества','готов к продаже'].includes(x.status)?x.status:'черновик';
+}
 function E(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function render(){
  const q=(document.getElementById('q').value||'').trim().toLowerCase();
+ const contact=telegramContact(catalog.telegram_contact);
+ const top=document.getElementById('tg-top');top.hidden=!contact;if(contact)top.href=contact;else top.removeAttribute('href');
  const list=catalog.items.filter(x=>(cat==='all'||x.category===cat)&&(!q||(x.title+' '+x.description+' '+x.id).toLowerCase().includes(q)));
  document.getElementById('grid').innerHTML=list.map(x=>{
-  const status=x.status||(x.image?'готов к продаже':'черновик');
-  const ready=status==='готов к продаже'&&Boolean(x.image)&&catalog.telegram_contact&&catalog.telegram_contact!=='https://t.me/';
+  const status=productStatus(x),preview=previewPath(x);
+  const ready=status==='готов к продаже'&&Boolean(preview)&&Boolean(contact);
   const catNote=x.category==='3d'?' · Графический референс (не STL)':'';
-  const orderHref=ready?(catalog.telegram_contact+(catalog.telegram_contact.includes('?')?'&':'?')+'text='+encodeURIComponent('Заказ товара '+x.id+' ('+x.title+')')):'#';
+  const orderHref=ready?(contact+'?'+'text='+encodeURIComponent('Заказ товара '+x.id+' ('+x.title+')')):'#';
   return `
   <article class="card" data-id="${E(x.id)}">
-   <div class="thumb">${x.image?`<img src="${E(x.image)}" alt="${E(x.title)}">`:`<span>Превью в разработке · ${E(x.format)}</span>`}<span class="badge">${E(status)}</span></div>
+   <div class="thumb">${preview?`<img src="${E(preview)}" alt="${E(x.title)}">`:`<span>Превью в разработке · ${E(x.format)}</span>`}<span class="badge">${E(status)}</span></div>
    <div class="body">
     <div class="cat">${E(x.category_label)}${E(catNote)}</div>
     <h2 class="title">${E(x.title)}</h2>
@@ -79,7 +92,7 @@ document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{
  b.classList.add('active');cat=b.dataset.cat;render();
 });
 document.getElementById('q').oninput=render;
-fetch('./catalog.json').then(r=>r.json()).then(d=>{catalog=d;if(d.telegram_contact)document.getElementById('tg-top').href=d.telegram_contact;render()}).catch(render);
+fetch('./catalog.json').then(r=>{if(!r.ok)throw Error('catalog unavailable');return r.json()}).then(d=>{if(!d||!Array.isArray(d.items))throw Error('invalid catalog');catalog=d;render()}).catch(()=>{catalog={items:[],telegram_contact:''};render();document.getElementById('grid').textContent='Каталог временно недоступен.'});
 </script>
 </body>
 </html>
