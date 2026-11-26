@@ -73,16 +73,19 @@ class StorefrontHandler(http.server.BaseHTTPRequestHandler):
 
         file_path, ctype = resolved
         data = file_path.read_bytes()
-        self.send_response(200)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Content-Length', str(len(data)))
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('X-Frame-Options', 'SAMEORIGIN')
-        self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Cache-Control', 'public, max-age=300')
-        self.end_headers()
-        if not head_only:
-            self.wfile.write(data)
+        try:
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Frame-Options', 'SAMEORIGIN')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Cache-Control', 'public, max-age=300')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def do_GET(self) -> None:
         self._serve(head_only=False)

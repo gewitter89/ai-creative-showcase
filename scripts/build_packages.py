@@ -17,12 +17,24 @@ from ingest_asset import CAT_RE, ID_RE, DEFAULT_PRIVATE_DIR, sha256_file
 
 DEFAULT_PACKAGES_DIR = '/var/lib/naum-studio/packages'
 P0_POSTCARD_IDS = ('ny-kyiv-01', 'ny-cozy-02', 'ny-minimal-03')
+PHOTOSHOP_OVERLAY_IDS = ('ps-pack-01', 'ps-snow-02')
+PHOTOSHOP_BACKGROUND_IDS = ('ps-bg-03',)
+PHOTOSHOP_IDS = PHOTOSHOP_OVERLAY_IDS + PHOTOSHOP_BACKGROUND_IDS
+CONCEPT_3D_IDS = ('3d-ref-01', '3d-tree-02', '3d-owl-03')
+ALL_PRODUCT_IDS = P0_POSTCARD_IDS + PHOTOSHOP_IDS + CONCEPT_3D_IDS
+
 DEMO_PRODUCT_ID = 'demo-ny'
 DEMO_SOURCE_PREVIEW = 'assets/newyear/ny-kyiv-01/preview.webp'
 PRINT_SIZE_PX = (1772, 1181)  # 150x100 mm @ 300 dpi
 PRINT_DPI = (300, 300)
 SOCIAL_SIZE_PX = (1200, 800)  # 3:2 web / social media
+PS_OVERLAY_HIGH_RES_PX = (3000, 2000)  # 3:2 high-res Screen overlay
+PS_BG_HIGH_RES_PX = (2400, 3000)  # 4:5 portrait high-res backdrop @ 300 dpi
+PS_BG_WEB_PX = (960, 1200)  # 4:5 portrait web/social backdrop
+CONCEPT_3D_HIGH_RES_PX = (2048, 2048)  # 1:1 sculpting viewport reference
+CONCEPT_3D_PREVIEW_PX = (1200, 1200)  # 1:1 compact JPEG reference
 PACKAGE_FILE_MODE = 0o640
+ALLOWED_VARIANT_EXTS = frozenset({'.png', '.jpg', '.jpeg', '.webp'})
 
 FONT_CANDIDATES = (
     '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
@@ -109,6 +121,64 @@ def find_original_file(
     return resolved
 
 
+def _find_extra_variants(item_dir: Path, main_original: Path) -> list[Path]:
+    """Return optional extra verified image variants in item_dir, excluding main_original."""
+    main_resolved = main_original.resolve()
+    extras: list[Path] = []
+    for path in sorted(item_dir.iterdir()):
+        if not path.is_file() or path.name.startswith('.'):
+            continue
+        if path.resolve() == main_resolved:
+            continue
+        if path.suffix.lower() not in ALLOWED_VARIANT_EXTS:
+            continue
+        if '_original' in path.stem:
+            # Skip older versioned originals unless explicitly named as a variant/view
+            if '_variant' not in path.stem and '_view' not in path.stem:
+                continue
+        extras.append(path)
+    return extras
+
+
+def _load_item_records(repo_root: Path, item_id: str) -> tuple[dict, dict, str]:
+    """Load catalog & manifest records for item_id and resolve its category."""
+    catalog = json.loads((repo_root / 'catalog.json').read_text(encoding='utf-8'))
+    manifest = json.loads((repo_root / 'generation_manifest.json').read_text(encoding='utf-8'))
+
+    c_item = next((x for x in catalog.get('items', []) if x.get('id') == item_id), None)
+    m_item = next((x for x in manifest.get('items', []) if x.get('id') == item_id), None)
+    if not c_item or not m_item:
+        raise ValueError(f'Item {item_id!r} not found in catalog.json/generation_manifest.json')
+
+    category = str(m_item.get('category') or c_item.get('category') or '').strip()
+    if not CAT_RE.fullmatch(category):
+        raise ValueError(f'Invalid category for {item_id!r}: {category!r}')
+    return c_item, m_item, category
+
+
+def _write_zip_atomic(output_dir: Path, item_id: str, files_map: dict[str, bytes]) -> Path:
+    """Write deterministic ZIP archive atomically with 0640 permissions."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zip_dest = output_dir / f'{item_id}.zip'
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{item_id}.', suffix='.zip.tmp', dir=str(output_dir))
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, mode='w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for arcname, payload in files_map.items():
+                info = zipfile.ZipInfo(filename=arcname, date_time=(2026, 11, 26, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (0o644 & 0xFFFF) << 16
+                zf.writestr(info, payload)
+        os.chmod(tmp_path, PACKAGE_FILE_MODE)
+        os.replace(tmp_path, zip_dest)
+        os.chmod(zip_dest, PACKAGE_FILE_MODE)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return zip_dest
+
+
 def _render_greeting_card(base_rgb: Image.Image, item_id: str) -> bytes:
     """Render clean Ukrainian greeting typography onto a 1772x1181 PNG card."""
     spec = POSTCARD_GREETINGS.get(
@@ -183,6 +253,22 @@ def _encode_original_png(orig_path: Path, src_img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+def _encode_png_fitted(
+    img: Image.Image,
+    size: tuple[int, int],
+    dpi: tuple[int, int] | None = None,
+) -> bytes:
+    """Encode an image resized/fitted cleanly with LANCZOS as lossless PNG without EXIF."""
+    mode = 'RGBA' if img.mode in ('RGBA', 'LA', 'P') else 'RGB'
+    fitted = ImageOps.fit(img.convert(mode), size, method=Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    kwargs: dict = {'format': 'PNG', 'optimize': True}
+    if dpi is not None:
+        kwargs['dpi'] = dpi
+    fitted.save(buf, **kwargs)
+    return buf.getvalue()
+
+
 def _encode_jpeg(img: Image.Image, size: tuple[int, int], quality: int, dpi: tuple[int, int]) -> bytes:
     fitted = ImageOps.fit(img.convert('RGB'), size, method=Image.Resampling.LANCZOS)
     buf = io.BytesIO()
@@ -216,17 +302,151 @@ def _build_readme(catalog_item: dict, orig_size: tuple[int, int], orig_sha256: s
     )
 
 
-def _build_license(catalog_item: dict) -> str:
+def _build_photoshop_overlay_readme(
+    catalog_item: dict,
+    orig_size: tuple[int, int],
+    orig_sha256: str,
+    extra_names: list[str],
+) -> str:
+    item_id = catalog_item['id']
+    title = catalog_item['title']
+    ow, oh = orig_size
+    extras_block = ''.join(f'- {name:<23}: Additional verified overlay variant (lossless PNG)\n' for name in extra_names)
+    return (
+        f"NAUM AI Creative Studio — Photoshop Overlay Package\n"
+        f"===================================================\n\n"
+        f"Product ID: {item_id}\n"
+        f"Title: {title}\n"
+        f"Native Original Resolution: {ow}x{oh} px\n"
+        f"Original SHA-256: {orig_sha256}\n\n"
+        f"HONEST FORMAT NOTICE:\n"
+        f"- Raster PNG/JPEG files on a solid pure black RGB(0,0,0) background.\n"
+        f"- NOT a layered .PSD file and NOT alpha-channel transparency.\n"
+        f"- overlay_3000x2000.png is cleanly upscaled (3:2 LANCZOS) from the {ow}x{oh} native original.\n\n"
+        f"Included Files:\n"
+        f"- overlay_original.png   : Unmodified private original ({ow}x{oh} px, lossless PNG)\n"
+        f"- overlay_3000x2000.png  : High-resolution 3:2 overlay (3000x2000 px, 300 dpi PNG)\n"
+        f"- overlay_preview.jpg    : Reference preview (1200x800 px, sRGB JPEG, no EXIF)\n"
+        f"{extras_block}"
+        f"- README.txt             : Screen blending guide & format notice\n"
+        f"- LICENSE.txt            : Usage license\n\n"
+        f"How to Use in Adobe Photoshop (Screen Blending):\n"
+        f"1. Open your base photo or banner composition in Photoshop.\n"
+        f"2. File -> Place Embedded -> choose overlay_original.png or overlay_3000x2000.png.\n"
+        f"3. In the Layers panel, change Blend Mode from Normal to Screen (Экран).\n"
+        f"4. The pure black RGB(0,0,0) background becomes invisible, leaving only the light/snow.\n"
+        f"5. Optional: press Ctrl+L (Cmd+L) / Levels to clip any faint dark edge, or adjust Opacity.\n"
+        f"   (Also works in Affinity Photo, Photopea, GIMP, and CapCut/Premiere with Screen mode.)\n\n"
+        f"Support & Custom Requests:\n"
+        f"- Telegram: https://t.me/NaumCreativeStudioBot\n"
+    )
+
+
+def _build_photoshop_bg_readme(
+    catalog_item: dict,
+    orig_size: tuple[int, int],
+    orig_sha256: str,
+    extra_names: list[str],
+) -> str:
+    item_id = catalog_item['id']
+    title = catalog_item['title']
+    ow, oh = orig_size
+    extras_block = ''.join(f'- {name:<25}: Additional verified backdrop variant (lossless PNG)\n' for name in extra_names)
+    return (
+        f"NAUM AI Creative Studio — Photoshop Studio Backdrop Package\n"
+        f"===========================================================\n\n"
+        f"Product ID: {item_id}\n"
+        f"Title: {title}\n"
+        f"Native Original Resolution: {ow}x{oh} px\n"
+        f"Original SHA-256: {orig_sha256}\n\n"
+        f"HONEST FORMAT NOTICE:\n"
+        f"- Flat raster PNG/JPEG backgrounds in 4:5 portrait aspect ratio.\n"
+        f"- NOT an editable multi-layer .PSD mockup.\n"
+        f"- background_2400x3000.png and background_print_4x5.jpg are 4:5 upscaled from {ow}x{oh} px.\n\n"
+        f"Included Files:\n"
+        f"- background_original.png  : Unmodified private original ({ow}x{oh} px, lossless PNG)\n"
+        f"- background_2400x3000.png : High-resolution 4:5 backdrop (2400x3000 px, 300 dpi PNG)\n"
+        f"- background_print_4x5.jpg : Print-ready 4:5 sRGB JPEG (2400x3000 px, 300 dpi, no EXIF)\n"
+        f"- background_web_960x1200.jpg : Web/Instagram 4:5 JPEG (960x1200 px, no EXIF)\n"
+        f"{extras_block}"
+        f"- README.txt               : Photoshop compositing guide & format notice\n"
+        f"- LICENSE.txt              : Usage license\n\n"
+        f"Photoshop Compositing Tips (including Screen Blending):\n"
+        f"1. Place background_2400x3000.png as the bottom layer.\n"
+        f"2. Place your cut-out product above the podium and paint a soft Multiply contact shadow.\n"
+        f"3. For extra snow/bokeh atmosphere, add an overlay layer above your product and set\n"
+        f"   Blend Mode to Screen (Экран) so the black background disappears.\n\n"
+        f"Support & Custom Requests:\n"
+        f"- Telegram: https://t.me/NaumCreativeStudioBot\n"
+    )
+
+
+def _build_3d_concept_readme(
+    catalog_item: dict,
+    orig_size: tuple[int, int],
+    orig_sha256: str,
+    extra_names: list[str],
+) -> str:
+    item_id = catalog_item['id']
+    title = catalog_item['title']
+    ow, oh = orig_size
+    extras_block = ''.join(f'- {name:<24}: Additional orthographic view reference (PNG)\n' for name in extra_names)
+    return (
+        f"NAUM AI Creative Studio — 3D Modeling Concept Reference Package\n"
+        f"===============================================================\n\n"
+        f"Product ID: {item_id}\n"
+        f"Title: {title}\n"
+        f"Native Original Resolution: {ow}x{oh} px\n"
+        f"Original SHA-256: {orig_sha256}\n\n"
+        f"IMPORTANT / ВАЖНО — NOT A 3D PRINTABLE FILE (НЕ ГОТОВЫЙ STL):\n"
+        f"- Это 2D референс-концепт для 3D-моделирования и скульптинга (PNG/JPG),\n"
+        f"  а НЕ готовая 3D-модель (без STL / 3MF / OBJ / G-code).\n"
+        f"- This package contains 2D raster design reference art ONLY (NOT STL / 3MF / OBJ).\n"
+        f"- Printability, wall thickness, overhangs, and manifold geometry must be built and\n"
+        f"  verified manually in Blender / ZBrush / Nomad Sculpt and your 3D slicer.\n\n"
+        f"Included Files:\n"
+        f"- concept_original.png    : Unmodified private reference original ({ow}x{oh} px, lossless PNG)\n"
+        f"- reference_2048x2048.png : High-res 1:1 viewport reference (2048x2048 px, lossless PNG)\n"
+        f"- reference_1200x1200.jpg : Compact 1:1 sRGB JPEG reference (1200x1200 px, no EXIF)\n"
+        f"{extras_block}"
+        f"- README.txt              : 3D modeling reference disclaimer & guide\n"
+        f"- LICENSE.txt             : Usage license\n\n"
+        f"How to Use for 3D Modeling:\n"
+        f"- Blender: Add -> Image -> Reference (in Orthographic view) and block out base proportions.\n"
+        f"- Nomad Sculpt / ZBrush: Load reference_2048x2048.png as Image Plane / Spotlight.\n\n"
+        f"Support & Custom Requests:\n"
+        f"- Telegram: https://t.me/NaumCreativeStudioBot\n"
+    )
+
+
+def _build_license(catalog_item: dict, kind: str = 'postcard') -> str:
+    if kind == 'photoshop':
+        permitted = (
+            "1. Personal and commercial graphic design, social media visuals, banners, and mockups\n"
+            "   where the asset is flattened/composited into a finished creative work.\n"
+            "2. Client projects and printed promotional materials.\n"
+        )
+    elif kind == '3d_concept':
+        permitted = (
+            "1. Using the 2D reference artwork as a visual guide to sculpt or model your own\n"
+            "   3D mesh in Blender, ZBrush, Nomad Sculpt, or CAD software for personal printing.\n"
+            "2. Studying proportions and silhouette for non-commercial creative practice.\n"
+        )
+    else:
+        permitted = (
+            "1. Personal greetings, digital messaging, and social media posts.\n"
+            "2. Printing physical postcards for personal, family, or non-resale corporate gifting.\n"
+        )
+
     return (
         "NAUM AI Creative Studio — Standard Digital Asset License\n"
         "========================================================\n\n"
         f"Licensed Item: {catalog_item['id']} ({catalog_item['title']})\n"
         "Licensor: NAUM AI Creative Studio (https://t.me/NaumCreativeStudioBot)\n\n"
         "PERMITTED USES:\n"
-        "1. Personal greetings, digital messaging, and social media posts.\n"
-        "2. Printing physical postcards for personal, family, or non-resale corporate gifting.\n\n"
+        f"{permitted}\n"
         "PROHIBITED USES:\n"
-        "1. Reselling, redistributing, sublicensing, or sharing the digital files on marketplaces,\n"
+        "1. Reselling, redistributing, sublicensing, or sharing the raw digital files on marketplaces,\n"
         "   stock platforms, or free asset collections.\n"
         "2. Claiming authorship or registering the artwork as a trademark/NFT.\n\n"
         "All rights not expressly granted remain reserved by NAUM AI Creative Studio.\n"
@@ -244,15 +464,7 @@ def build_postcard_package(
     if item_id not in POSTCARD_GREETINGS:
         raise ValueError(f'Unsupported postcard item_id for P0 builder: {item_id!r}')
 
-    catalog = json.loads((repo_root / 'catalog.json').read_text(encoding='utf-8'))
-    manifest = json.loads((repo_root / 'generation_manifest.json').read_text(encoding='utf-8'))
-
-    c_item = next((x for x in catalog.get('items', []) if x.get('id') == item_id), None)
-    m_item = next((x for x in manifest.get('items', []) if x.get('id') == item_id), None)
-    if not c_item or not m_item:
-        raise ValueError(f'Item {item_id!r} not found in catalog.json/generation_manifest.json')
-
-    category = str(m_item.get('category') or c_item.get('category') or 'newyear')
+    c_item, m_item, category = _load_item_records(repo_root, item_id)
     orig_path = find_original_file(originals_dir, category, item_id, m_item, verify_hash=verify_hash)
     orig_sha256 = sha256_file(orig_path)
 
@@ -266,7 +478,7 @@ def build_postcard_package(
         social_jpg = _encode_jpeg(rgb, SOCIAL_SIZE_PX, quality=90, dpi=(72, 72))
 
     readme_txt = _build_readme(c_item, orig_size, orig_sha256).encode('utf-8')
-    license_txt = _build_license(c_item).encode('utf-8')
+    license_txt = _build_license(c_item, kind='postcard').encode('utf-8')
 
     files_map = {
         'artwork_original.png': artwork_png,
@@ -277,28 +489,11 @@ def build_postcard_package(
         'LICENSE.txt': license_txt,
     }
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    zip_dest = output_dir / f'{item_id}.zip'
-    fd, tmp_name = tempfile.mkstemp(prefix=f'.{item_id}.', suffix='.zip.tmp', dir=str(output_dir))
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        with zipfile.ZipFile(tmp_path, mode='w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for arcname, payload in files_map.items():
-                info = zipfile.ZipInfo(filename=arcname, date_time=(2026, 11, 26, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (0o644 & 0xFFFF) << 16
-                zf.writestr(info, payload)
-        os.chmod(tmp_path, PACKAGE_FILE_MODE)
-        os.replace(tmp_path, zip_dest)
-        os.chmod(zip_dest, PACKAGE_FILE_MODE)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
+    zip_dest = _write_zip_atomic(output_dir, item_id, files_map)
     return {
         'ok': True,
         'item_id': item_id,
+        'category': category,
         'package_path': str(zip_dest),
         'package_sha256': sha256_file(zip_dest),
         'package_bytes': zip_dest.stat().st_size,
@@ -307,6 +502,137 @@ def build_postcard_package(
         'original_size': f'{orig_size[0]}x{orig_size[1]}',
         'files': list(files_map.keys()),
     }
+
+
+def build_photoshop_package(
+    repo_root: Path,
+    item_id: str,
+    originals_dir: Path = Path(DEFAULT_PRIVATE_DIR),
+    output_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    verify_hash: bool = True,
+) -> dict:
+    """Build a commercial ZIP package for a Photoshop overlay or studio backdrop item."""
+    if item_id not in PHOTOSHOP_IDS:
+        raise ValueError(f'Unsupported Photoshop item_id: {item_id!r}')
+
+    c_item, m_item, category = _load_item_records(repo_root, item_id)
+    orig_path = find_original_file(originals_dir, category, item_id, m_item, verify_hash=verify_hash)
+    orig_sha256 = sha256_file(orig_path)
+    extra_paths = _find_extra_variants(orig_path.parent, orig_path)
+
+    files_map: dict[str, bytes] = {}
+    extra_arcnames: list[str] = []
+
+    with Image.open(orig_path) as img:
+        img.load()
+        orig_size = img.size
+        if item_id in PHOTOSHOP_OVERLAY_IDS:
+            files_map['overlay_original.png'] = _encode_original_png(orig_path, img)
+            files_map['overlay_3000x2000.png'] = _encode_png_fitted(img, PS_OVERLAY_HIGH_RES_PX, dpi=PRINT_DPI)
+            files_map['overlay_preview.jpg'] = _encode_jpeg(img, SOCIAL_SIZE_PX, quality=90, dpi=(72, 72))
+        else:
+            files_map['background_original.png'] = _encode_original_png(orig_path, img)
+            files_map['background_2400x3000.png'] = _encode_png_fitted(img, PS_BG_HIGH_RES_PX, dpi=PRINT_DPI)
+            files_map['background_print_4x5.jpg'] = _encode_jpeg(img, PS_BG_HIGH_RES_PX, quality=95, dpi=PRINT_DPI)
+            files_map['background_web_960x1200.jpg'] = _encode_jpeg(img, PS_BG_WEB_PX, quality=90, dpi=(72, 72))
+
+    for idx, extra_path in enumerate(extra_paths, start=2):
+        with Image.open(extra_path) as extra_img:
+            extra_img.load()
+            prefix = 'overlay_variant' if item_id in PHOTOSHOP_OVERLAY_IDS else 'background_variant'
+            arcname = f'{prefix}_{idx:02d}.png'
+            files_map[arcname] = _encode_original_png(extra_path, extra_img)
+            extra_arcnames.append(arcname)
+
+    if item_id in PHOTOSHOP_OVERLAY_IDS:
+        readme_str = _build_photoshop_overlay_readme(c_item, orig_size, orig_sha256, extra_arcnames)
+    else:
+        readme_str = _build_photoshop_bg_readme(c_item, orig_size, orig_sha256, extra_arcnames)
+
+    files_map['README.txt'] = readme_str.encode('utf-8')
+    files_map['LICENSE.txt'] = _build_license(c_item, kind='photoshop').encode('utf-8')
+
+    zip_dest = _write_zip_atomic(output_dir, item_id, files_map)
+    return {
+        'ok': True,
+        'item_id': item_id,
+        'category': category,
+        'package_path': str(zip_dest),
+        'package_sha256': sha256_file(zip_dest),
+        'package_bytes': zip_dest.stat().st_size,
+        'original_path': str(orig_path),
+        'original_sha256': orig_sha256,
+        'original_size': f'{orig_size[0]}x{orig_size[1]}',
+        'files': list(files_map.keys()),
+    }
+
+
+def build_3d_concept_package(
+    repo_root: Path,
+    item_id: str,
+    originals_dir: Path = Path(DEFAULT_PRIVATE_DIR),
+    output_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    verify_hash: bool = True,
+) -> dict:
+    """Build a commercial ZIP package for a 3D modeling concept reference (not STL)."""
+    if item_id not in CONCEPT_3D_IDS:
+        raise ValueError(f'Unsupported 3D concept item_id: {item_id!r}')
+
+    c_item, m_item, category = _load_item_records(repo_root, item_id)
+    orig_path = find_original_file(originals_dir, category, item_id, m_item, verify_hash=verify_hash)
+    orig_sha256 = sha256_file(orig_path)
+    extra_paths = _find_extra_variants(orig_path.parent, orig_path)
+
+    files_map: dict[str, bytes] = {}
+    extra_arcnames: list[str] = []
+
+    with Image.open(orig_path) as img:
+        img.load()
+        orig_size = img.size
+        files_map['concept_original.png'] = _encode_original_png(orig_path, img)
+        files_map['reference_2048x2048.png'] = _encode_png_fitted(img, CONCEPT_3D_HIGH_RES_PX, dpi=PRINT_DPI)
+        files_map['reference_1200x1200.jpg'] = _encode_jpeg(img, CONCEPT_3D_PREVIEW_PX, quality=92, dpi=(72, 72))
+
+    for idx, extra_path in enumerate(extra_paths, start=2):
+        with Image.open(extra_path) as extra_img:
+            extra_img.load()
+            arcname = f'reference_view_{idx:02d}.png'
+            files_map[arcname] = _encode_original_png(extra_path, extra_img)
+            extra_arcnames.append(arcname)
+
+    files_map['README.txt'] = _build_3d_concept_readme(c_item, orig_size, orig_sha256, extra_arcnames).encode('utf-8')
+    files_map['LICENSE.txt'] = _build_license(c_item, kind='3d_concept').encode('utf-8')
+
+    zip_dest = _write_zip_atomic(output_dir, item_id, files_map)
+    return {
+        'ok': True,
+        'item_id': item_id,
+        'category': category,
+        'package_path': str(zip_dest),
+        'package_sha256': sha256_file(zip_dest),
+        'package_bytes': zip_dest.stat().st_size,
+        'original_path': str(orig_path),
+        'original_sha256': orig_sha256,
+        'original_size': f'{orig_size[0]}x{orig_size[1]}',
+        'files': list(files_map.keys()),
+    }
+
+
+def build_product_package(
+    repo_root: Path,
+    item_id: str,
+    originals_dir: Path = Path(DEFAULT_PRIVATE_DIR),
+    output_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    verify_hash: bool = True,
+) -> dict:
+    """Dispatch ZIP package building for any supported catalog product ID."""
+    if item_id in POSTCARD_GREETINGS:
+        return build_postcard_package(repo_root, item_id, originals_dir, output_dir, verify_hash=verify_hash)
+    if item_id in PHOTOSHOP_IDS:
+        return build_photoshop_package(repo_root, item_id, originals_dir, output_dir, verify_hash=verify_hash)
+    if item_id in CONCEPT_3D_IDS:
+        return build_3d_concept_package(repo_root, item_id, originals_dir, output_dir, verify_hash=verify_hash)
+    raise ValueError(f'Unsupported product item_id: {item_id!r}')
 
 
 def build_all_p0_postcards(
@@ -319,6 +645,26 @@ def build_all_p0_postcards(
     """Build commercial ZIP packages for all specified P0 postcard IDs."""
     return [
         build_postcard_package(
+            repo_root=repo_root,
+            item_id=item_id,
+            originals_dir=originals_dir,
+            output_dir=output_dir,
+            verify_hash=verify_hash,
+        )
+        for item_id in item_ids
+    ]
+
+
+def build_all_packages(
+    repo_root: Path,
+    item_ids: Iterable[str] = ALL_PRODUCT_IDS,
+    originals_dir: Path = Path(DEFAULT_PRIVATE_DIR),
+    output_dir: Path = Path(DEFAULT_PACKAGES_DIR),
+    verify_hash: bool = True,
+) -> list[dict]:
+    """Build commercial ZIP packages for all specified batch-01 catalog products."""
+    return [
+        build_product_package(
             repo_root=repo_root,
             item_id=item_id,
             originals_dir=originals_dir,
@@ -423,25 +769,7 @@ def build_demo_postcard_package(
         'LICENSE.txt': license_txt,
     }
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    zip_dest = output_dir / f'{item_id}.zip'
-    fd, tmp_name = tempfile.mkstemp(prefix=f'.{item_id}.', suffix='.zip.tmp', dir=str(output_dir))
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        with zipfile.ZipFile(tmp_path, mode='w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for arcname, payload in files_map.items():
-                info = zipfile.ZipInfo(filename=arcname, date_time=(2026, 11, 26, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (0o644 & 0xFFFF) << 16
-                zf.writestr(info, payload)
-        os.chmod(tmp_path, PACKAGE_FILE_MODE)
-        os.replace(tmp_path, zip_dest)
-        os.chmod(zip_dest, PACKAGE_FILE_MODE)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
+    zip_dest = _write_zip_atomic(output_dir, item_id, files_map)
     return {
         'ok': True,
         'item_id': item_id,
@@ -454,11 +782,12 @@ def build_demo_postcard_package(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Build commercial ZIP packages for NAUM P0 postcards')
+    ap = argparse.ArgumentParser(description='Build commercial ZIP packages for NAUM AI Creative Studio')
     ap.add_argument('--repo', default='/opt/ai-creative-showcase', help='Path to ai-creative-showcase repo')
     ap.add_argument('--originals-dir', default=DEFAULT_PRIVATE_DIR, help='Private originals directory')
     ap.add_argument('--output-dir', default=DEFAULT_PACKAGES_DIR, help='Output packages directory')
-    ap.add_argument('--item-id', action='append', dest='item_ids', help='Specific postcard ID (repeatable)')
+    ap.add_argument('--item-id', action='append', dest='item_ids', help='Specific product ID (repeatable)')
+    ap.add_argument('--p0-only', action='store_true', help='Build only P0 postcards (ny-kyiv-01, ny-cozy-02, ny-minimal-03)')
     ap.add_argument('--skip-hash-check', action='store_true', help='Skip manifest original SHA-256 check')
     ap.add_argument('--include-demo', action='store_true', help='Also build free demo-ny.zip lead magnet')
     ap.add_argument('--demo-only', action='store_true', help='Build only free demo-ny.zip lead magnet')
@@ -468,9 +797,14 @@ def main() -> None:
     out_dir = Path(args.output_dir)
     results: list[dict] = []
     if not args.demo_only:
-        ids = args.item_ids if args.item_ids else list(P0_POSTCARD_IDS)
+        if args.item_ids:
+            ids = args.item_ids
+        elif args.p0_only:
+            ids = list(P0_POSTCARD_IDS)
+        else:
+            ids = list(ALL_PRODUCT_IDS)
         results.extend(
-            build_all_p0_postcards(
+            build_all_packages(
                 repo_root=repo_root,
                 item_ids=ids,
                 originals_dir=Path(args.originals_dir),

@@ -10,13 +10,24 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from build_packages import (
+    ALL_PRODUCT_IDS,
+    CONCEPT_3D_HIGH_RES_PX,
+    CONCEPT_3D_IDS,
+    CONCEPT_3D_PREVIEW_PX,
     DEMO_PRODUCT_ID,
     P0_POSTCARD_IDS,
+    PHOTOSHOP_BACKGROUND_IDS,
+    PHOTOSHOP_OVERLAY_IDS,
     PRINT_SIZE_PX,
+    PS_BG_HIGH_RES_PX,
+    PS_BG_WEB_PX,
+    PS_OVERLAY_HIGH_RES_PX,
     SOCIAL_SIZE_PX,
     build_all_p0_postcards,
+    build_all_packages,
     build_demo_postcard_package,
     build_postcard_package,
+    build_product_package,
 )
 from ingest_asset import sha256_file
 
@@ -33,12 +44,18 @@ def populated_studio(tmp_path: Path):
     packages = tmp_path / 'packages'
 
     specs = {
-        'ny-kyiv-01': ('ny-kyiv-01_original.jpg', 'JPEG', (1024, 682), (18, 42, 88)),
-        'ny-cozy-02': ('ny-cozy-02_original.jpg', 'JPEG', (1024, 682), (62, 38, 24)),
-        'ny-minimal-03': ('ny-minimal-03_original.png', 'PNG', (1536, 1024), (16, 48, 32)),
+        'ny-kyiv-01': ('newyear', 'ny-kyiv-01_original.jpg', 'JPEG', (1024, 682), (18, 42, 88)),
+        'ny-cozy-02': ('newyear', 'ny-cozy-02_original.jpg', 'JPEG', (1024, 682), (62, 38, 24)),
+        'ny-minimal-03': ('newyear', 'ny-minimal-03_original.png', 'PNG', (1536, 1024), (16, 48, 32)),
+        'ps-pack-01': ('photoshop', 'ps-pack-01_original.png', 'PNG', (1536, 1024), (0, 0, 0)),
+        'ps-snow-02': ('photoshop', 'ps-snow-02_original.png', 'PNG', (1536, 1024), (0, 0, 0)),
+        'ps-bg-03': ('photoshop', 'ps-bg-03_original.png', 'PNG', (1122, 1402), (12, 24, 48)),
+        '3d-ref-01': ('3d', '3d-ref-01_original.png', 'PNG', (1254, 1254), (160, 155, 150)),
+        '3d-tree-02': ('3d', '3d-tree-02_original.png', 'PNG', (1254, 1254), (150, 150, 145)),
+        '3d-owl-03': ('3d', '3d-owl-03_original.png', 'PNG', (1254, 1254), (155, 155, 155)),
     }
-    for item_id, (fname, fmt, size, color) in specs.items():
-        d = originals / 'newyear' / item_id
+    for item_id, (category, fname, fmt, size, color) in specs.items():
+        d = originals / category / item_id
         d.mkdir(parents=True, exist_ok=True)
         fpath = d / fname
         Image.new('RGB', size, color).save(fpath, format=fmt)
@@ -102,6 +119,114 @@ def test_build_all_p0_postcards_creates_valid_zips(populated_studio):
             assert 'NAUM AI Creative Studio' in license_txt
 
 
+def test_build_all_9_packages_photoshop_and_3d_concepts(populated_studio):
+    repo, originals, packages = populated_studio
+    results = build_all_packages(repo, originals_dir=originals, output_dir=packages)
+    assert [r['item_id'] for r in results] == list(ALL_PRODUCT_IDS)
+
+    by_id = {r['item_id']: r for r in results}
+
+    for item_id in PHOTOSHOP_OVERLAY_IDS:
+        zip_path = Path(by_id[item_id]['package_path'])
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            assert set(zf.namelist()) == {
+                'overlay_original.png',
+                'overlay_3000x2000.png',
+                'overlay_preview.jpg',
+                'README.txt',
+                'LICENSE.txt',
+            }
+            with Image.open(io.BytesIO(zf.read('overlay_original.png'))) as orig_im:
+                assert orig_im.size == (1536, 1024)
+                assert orig_im.format == 'PNG'
+            with Image.open(io.BytesIO(zf.read('overlay_3000x2000.png'))) as hi_im:
+                assert hi_im.size == PS_OVERLAY_HIGH_RES_PX
+                assert hi_im.format == 'PNG'
+            with Image.open(io.BytesIO(zf.read('overlay_preview.jpg'))) as prev_im:
+                assert prev_im.size == SOCIAL_SIZE_PX
+                assert 'exif' not in prev_im.info
+            readme = zf.read('README.txt').decode('utf-8')
+            license_txt = zf.read('LICENSE.txt').decode('utf-8')
+            assert 'Screen' in readme
+            assert 'RGB(0,0,0)' in readme
+            assert 'NOT a layered .PSD' in readme
+            assert 'NAUM AI Creative Studio' in license_txt
+
+    for item_id in PHOTOSHOP_BACKGROUND_IDS:
+        zip_path = Path(by_id[item_id]['package_path'])
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            assert set(zf.namelist()) == {
+                'background_original.png',
+                'background_2400x3000.png',
+                'background_print_4x5.jpg',
+                'background_web_960x1200.jpg',
+                'README.txt',
+                'LICENSE.txt',
+            }
+            with Image.open(io.BytesIO(zf.read('background_original.png'))) as orig_im:
+                assert orig_im.size == (1122, 1402)
+            with Image.open(io.BytesIO(zf.read('background_2400x3000.png'))) as hi_im:
+                assert hi_im.size == PS_BG_HIGH_RES_PX
+            with Image.open(io.BytesIO(zf.read('background_print_4x5.jpg'))) as pr_im:
+                assert pr_im.size == PS_BG_HIGH_RES_PX
+                assert pr_im.info.get('dpi') == (300, 300)
+                assert 'exif' not in pr_im.info
+            with Image.open(io.BytesIO(zf.read('background_web_960x1200.jpg'))) as web_im:
+                assert web_im.size == PS_BG_WEB_PX
+            readme = zf.read('README.txt').decode('utf-8')
+            assert 'Screen' in readme
+            assert 'NOT an editable multi-layer .PSD' in readme
+
+    for item_id in CONCEPT_3D_IDS:
+        zip_path = Path(by_id[item_id]['package_path'])
+        assert stat.S_IMODE(zip_path.stat().st_mode) == 0o640
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            assert set(zf.namelist()) == {
+                'concept_original.png',
+                'reference_2048x2048.png',
+                'reference_1200x1200.jpg',
+                'README.txt',
+                'LICENSE.txt',
+            }
+            with Image.open(io.BytesIO(zf.read('concept_original.png'))) as orig_im:
+                assert orig_im.size == (1254, 1254)
+                assert orig_im.format == 'PNG'
+            with Image.open(io.BytesIO(zf.read('reference_2048x2048.png'))) as hi_im:
+                assert hi_im.size == CONCEPT_3D_HIGH_RES_PX
+            with Image.open(io.BytesIO(zf.read('reference_1200x1200.jpg'))) as prev_im:
+                assert prev_im.size == CONCEPT_3D_PREVIEW_PX
+                assert 'exif' not in prev_im.info
+            readme = zf.read('README.txt').decode('utf-8')
+            license_txt = zf.read('LICENSE.txt').decode('utf-8')
+            assert 'референс-концепт для 3D-моделирования' in readme
+            assert 'НЕ ГОТОВЫЙ STL' in readme
+            assert 'NOT STL / 3MF / OBJ' in readme
+            assert 'sculpt or model' in license_txt
+
+
+def test_optional_extra_variants_included_and_unknown_product_rejected(populated_studio):
+    repo, originals, packages = populated_studio
+
+    # Optional extra view for 3D concept and extra variant for Photoshop overlay
+    extra_view = originals / '3d' / '3d-ref-01' / '3d-ref-01_view_left.png'
+    Image.new('RGB', (1254, 1254), (120, 120, 120)).save(extra_view, format='PNG')
+    res_3d = build_product_package(repo, '3d-ref-01', originals_dir=originals, output_dir=packages)
+    assert 'reference_view_02.png' in res_3d['files']
+    with zipfile.ZipFile(res_3d['package_path'], 'r') as zf:
+        assert 'reference_view_02.png' in zf.namelist()
+        assert 'reference_view_02.png' in zf.read('README.txt').decode('utf-8')
+
+    extra_ov = originals / 'photoshop' / 'ps-pack-01' / 'ps-pack-01_variant_02.png'
+    Image.new('RGB', (1536, 1024), (10, 20, 30)).save(extra_ov, format='PNG')
+    res_ps = build_product_package(repo, 'ps-pack-01', originals_dir=originals, output_dir=packages)
+    assert 'overlay_variant_02.png' in res_ps['files']
+
+    with pytest.raises(ValueError, match='Unsupported product'):
+        build_product_package(repo, 'unknown-99', originals_dir=originals, output_dir=packages)
+
+
 def test_build_package_verifies_sha256_and_supports_versioned_originals(populated_studio):
     repo, originals, packages = populated_studio
 
@@ -129,7 +254,7 @@ def test_build_package_verifies_sha256_and_supports_versioned_originals(populate
     with pytest.raises(ValueError, match='SHA-256 mismatch'):
         build_postcard_package(repo, 'ny-kyiv-01', originals_dir=originals, output_dir=packages)
 
-    # Reject unknown/non-P0 IDs
+    # Reject unknown/non-P0 IDs in P0 postcard builder
     with pytest.raises(ValueError, match='Unsupported postcard'):
         build_postcard_package(repo, 'ps-pack-01', originals_dir=originals, output_dir=packages)
 

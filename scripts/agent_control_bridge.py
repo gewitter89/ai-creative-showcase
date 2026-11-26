@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from build_packages import DEFAULT_PACKAGES_DIR
+from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID
 from build_promo_reels import DEFAULT_PROMO_DIR
 from store_db import DEFAULT_DB_PATH, StoreDB
 
@@ -75,7 +75,7 @@ def collect_pipeline_snapshot(
     packages_dir: Path = Path(DEFAULT_PACKAGES_DIR),
     promo_dir: Path = Path(DEFAULT_PROMO_DIR),
 ) -> dict:
-    """Build a structured 11-stage snapshot + analytics + explicit free generator blocker."""
+    """Build a structured 11-stage snapshot + analytics + #cloud summary + explicit free generator blocker."""
     catalog = json.loads((repo_root / 'catalog.json').read_text(encoding='utf-8'))
     manifest = json.loads((repo_root / 'generation_manifest.json').read_text(encoding='utf-8'))
     manifest_by_id = {
@@ -93,9 +93,11 @@ def collect_pipeline_snapshot(
         items_state.append(
             {
                 'id': pid,
+                'category': c_item.get('category', ''),
                 'status': c_item.get('status', 'черновик'),
                 'stage': stage,
                 'package_ready': (packages_dir / f'{pid}.zip').is_file(),
+                'catalog_package_ready': bool(c_item.get('package_ready')),
                 'promo_reel_ready': (promo_dir / f'{pid}_reel.mp4').is_file(),
             }
         )
@@ -115,12 +117,41 @@ def collect_pipeline_snapshot(
         }
     )
 
+    demo_offer = catalog.get('demo_offer') if isinstance(catalog.get('demo_offer'), dict) else {}
+    demo_id = str(demo_offer.get('id') or DEMO_PRODUCT_ID)
+    demo_package_ready = (packages_dir / f'{demo_id}.zip').is_file()
+    demo_reel_ready = (promo_dir / 'demo_ny_reel.mp4').is_file()
+    packages_ready_count = sum(1 for x in items_state if x['package_ready'])
+    packages_pending_count = len(items_state) - packages_ready_count
+
     return {
         'generated_at': utc_now_iso(),
         'stages': list(PIPELINE_STAGES),
         'stage_counts': stage_counts,
         'blockers': [FREE_IMAGE_GENERATOR_BLOCKER],
-        'demo_reel_ready': (promo_dir / 'demo_ny_reel.mp4').is_file(),
+        'demo_package_ready': demo_package_ready,
+        'demo_reel_ready': demo_reel_ready,
+        'demo': {
+            'id': demo_id,
+            'deeplink': str(demo_offer.get('deeplink') or 'demo_ny'),
+            'package_ready': demo_package_ready,
+            'promo_reel_ready': demo_reel_ready,
+            'deliveries_sent': analytics['demo_deliveries_sent'],
+            'unique_leads': analytics['demo_unique_leads'],
+        },
+        'summary': {
+            'total_products': len(items_state),
+            'packages_ready': packages_ready_count,
+            'packages_pending': packages_pending_count,
+            'approved_for_sale': sum(
+                1 for x in items_state if x['status'] == 'готов к продаже' and x['package_ready']
+            ),
+            'in_qa_or_build': sum(
+                1 for x in items_state if x['status'] != 'готов к продаже' or not x['package_ready']
+            ),
+            'promo_reels_ready': sum(1 for x in items_state if x['promo_reel_ready']),
+            'demo_ready': demo_package_ready,
+        },
         'analytics': analytics,
         'items': items_state,
     }
@@ -132,6 +163,7 @@ def sync_snapshot_to_agent_control(ac_db_path: Path, snapshot: dict) -> dict:
         return {'ok': False, 'reason': f'AGENT CONTROL DB not found: {ac_db_path}'}
 
     now = utc_now_iso()
+    summary = snapshot.get('summary') or {}
     with sqlite3.connect(str(ac_db_path), timeout=15.0) as conn:
         conn.execute(
             'CREATE TABLE IF NOT EXISTS ac_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)'
@@ -160,7 +192,11 @@ def sync_snapshot_to_agent_control(ac_db_path: Path, snapshot: dict) -> dict:
             (
                 0,
                 'INFO',
-                f"Showcase pipeline synced ({len(snapshot.get('items', []))} items); blocker={FREE_IMAGE_GENERATOR_BLOCKER['status']}",
+                (
+                    f"Showcase pipeline synced ({summary.get('total_products', len(snapshot.get('items', [])))} items, "
+                    f"ready={summary.get('packages_ready', 0)}, pending={summary.get('packages_pending', 0)}, "
+                    f"demo_ready={summary.get('demo_ready', False)}); blocker={FREE_IMAGE_GENERATOR_BLOCKER['status']}"
+                ),
                 now,
             ),
         )
