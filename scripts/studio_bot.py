@@ -843,6 +843,34 @@ def _handle_refund_command(
 
 
 
+
+
+def send_telegram_photo(token: str, chat_id: int | str, file_path: Path, caption: str, reply_markup: dict | None = None) -> dict:
+    """Send a JPEG/PNG image via Telegram Bot API sendPhoto."""
+    import json as _json
+    import urllib.request as _req
+    boundary = f'----NaumPhoto{int(time.time() * 1000)}'
+    fields = {'chat_id': str(chat_id), 'caption': caption}
+    if reply_markup is not None:
+        fields['reply_markup'] = _json.dumps(reply_markup)
+    body = bytearray()
+    for key, val in fields.items():
+        body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{val}\r\n'.encode('utf-8'))
+    file_bytes = file_path.read_bytes()
+    body.extend(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="{file_path.name}"\r\nContent-Type: image/jpeg\r\n\r\n'.encode('utf-8')
+    )
+    body.extend(file_bytes)
+    body.extend(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+    req = _req.Request(
+        f'https://api.telegram.org/bot{token}/sendPhoto',
+        data=bytes(body),
+        headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+        method='POST',
+    )
+    with _req.urlopen(req, timeout=30) as resp:
+        return _json.loads(resp.read().decode('utf-8'))
+
 def _queue_radar_task(source_id: str) -> tuple[bool, str]:
     """Read signal from radar.db and enqueue a cloud GitHub MVP task."""
     import json as _json
@@ -993,6 +1021,7 @@ def process_update(
     download_fn: Callable[[str, str, Path], None] = download_telegram_file,
     push_fn: Callable[[Path, str, str, str], None] = git_push_preview,
     send_document_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_document,
+    send_photo_fn: Callable[..., dict] = send_telegram_photo,
 ) -> None:
     """Process a single Telegram update with strict role separation and private-chat admin checks."""
     if not cfg.owner_ids:
@@ -1082,6 +1111,36 @@ def process_update(
 
     if cmd in ('/support', '/paysupport') and private:
         _handle_support_command(cmd, text, msg, chat_id, cfg, store, api_fn)
+        return
+
+    if cmd == '/card':
+        raw_name = text[len('/card'):].strip()
+        if not raw_name:
+            api_fn(cfg.token, 'sendMessage', {
+                'chat_id': chat_id,
+                'text': '✨ Напиши имя после команды, и я сделаю именную открытку за 3 секунды!\nНапример: /card Марина',
+            })
+            return
+        try:
+            from viral_card import generate_personalized_card
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                card_path = Path(tmp.name)
+            try:
+                generate_personalized_card(cfg.repo, raw_name, card_path)
+                markup = {'inline_keyboard': [[{'text': '🔥 Полный HD-набор без подписи', 'url': 'https://t.me/NaumCreativeStudioBot?start=buy_ny-kyiv-01'}]]}
+                send_photo_fn(
+                    cfg.token,
+                    chat_id,
+                    card_path,
+                    f'🎄 Готово! Именная открытка для {raw_name[:28]}.\nПерешли друзьям — пусть тоже сделают себе через /card!',
+                    markup,
+                )
+                if store is not None:
+                    store.log_event('viral_card_created', user_id=str(get_sender_id(msg) or chat_id), details={'name': raw_name[:28]})
+            finally:
+                card_path.unlink(missing_ok=True)
+        except Exception as exc:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': f'Не получилось сделать открытку: {_sanitize_error(exc, cfg.token)}'})
         return
 
     # Non-owners (customers) never reach admin commands or asset ingestion
