@@ -78,7 +78,9 @@
       "preview_path": "assets/3d/3d-tree-02/preview.webp",
       "delivery_requirements": "Три PNG: front / left side / back. Использовать первое изображение как референс для следующих ракурсов. STL/3MF не входит; фактическая геометрия и печать требуют отдельного моделирования и проверки.",
       "prompt": "Create ONE orthographic design-reference image for an original minimalist Nordic-style tabletop Christmas tree object. [VIEW] view. Consistent geometry: three broad stacked rounded conical tiers, smooth scalloped edges, one thick integrated rounded star at the top, wide flat circular base, single solid-looking silhouette without detached decorations, muted monochrome clay render on a plain light-gray background, diffuse studio light, centered 1:1, orthographic, no text, branding, dimensions or watermark. This is reference art, not a verified 3D printable mesh.",
-      "status": "not_generated"
+      "status": "qa_pending",
+      "original_sha256": "19f6cf95ed5984ab5f996537b36a42fbfdeab29a09db55c5f1d656394aa28cf6",
+      "original_dimensions": "1254x1254"
     },
     {
       "id": "3d-owl-03",
