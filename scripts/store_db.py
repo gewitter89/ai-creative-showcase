@@ -519,89 +519,68 @@ class StoreDB:
         telegram_charge_id: str,
         provider_charge_id: str = '',
     ) -> tuple[str, dict | None]:
-        """Idempotently verify and persist a Telegram Stars successful_payment event."""
+        """Durably classify a charge before acknowledging the Telegram update."""
+        if (type(total_amount) is not int or total_amount <= 0 or
+                not isinstance(telegram_charge_id, str) or not telegram_charge_id or
+                len(telegram_charge_id) > 256):
+            return 'mismatch', None
         now = utc_now_iso()
         with self._connect() as conn:
-            existing_pay = conn.execute(
-                'SELECT * FROM payments WHERE telegram_payment_charge_id = ?',
-                (telegram_charge_id,),
-            ).fetchone()
-            if existing_pay:
-                order_row = conn.execute(
-                    'SELECT * FROM orders WHERE order_id = ?',
-                    (existing_pay['order_id'],),
-                ).fetchone()
-                self._log_audit_conn(
-                    conn,
-                    'payment_duplicate_ignored',
-                    actor_id=str(user_id),
-                    order_id=existing_pay['order_id'],
-                    product_id=order_row['product_id'] if order_row else '',
-                    details={'telegram_payment_charge_id': telegram_charge_id},
-                )
-                return 'duplicate_charge', dict(order_row) if order_row else None
-
-            order_row = conn.execute(
-                'SELECT * FROM orders WHERE invoice_payload = ?',
-                (invoice_payload,),
-            ).fetchone()
-            order = dict(order_row) if order_row else None
-
-            if (
-                order is None
-                or currency != 'XTR'
-                or int(total_amount) != int(order['amount_xtr'])
-                or str(user_id) != str(order['user_id'])
-                or order['status'] in ('refunded', 'cancelled')
-            ):
-                self._log_audit_conn(
-                    conn,
-                    'payment_mismatch',
-                    actor_id=str(user_id),
-                    order_id=order['order_id'] if order else '',
-                    product_id=order['product_id'] if order else '',
-                    details={
-                        'currency': currency,
-                        'total_amount': total_amount,
-                        'invoice_payload': invoice_payload,
-                        'telegram_payment_charge_id': telegram_charge_id,
-                    },
-                )
-                return 'mismatch', order
-
-            conn.execute(
-                """
-                INSERT INTO payments (
-                    order_id, user_id, currency, total_amount, invoice_payload,
-                    telegram_payment_charge_id, provider_payment_charge_id, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
-                """,
-                (
-                    order['order_id'],
-                    str(user_id),
-                    currency,
-                    int(total_amount),
-                    invoice_payload,
-                    telegram_charge_id,
-                    provider_charge_id,
-                    now,
-                ),
-            )
-            conn.execute(
-                "UPDATE orders SET status = 'paid', updated_at = ? WHERE order_id = ?",
-                (now, order['order_id']),
-            )
-            self._log_audit_conn(
-                conn,
-                'payment_received',
-                actor_id=str(user_id),
-                order_id=order['order_id'],
-                product_id=order['product_id'],
-                details={
-                    'amount_xtr': total_amount,
-                    'telegram_payment_charge_id': telegram_charge_id,
-                },
-            )
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute("""CREATE TABLE IF NOT EXISTS payment_review (
+                charge_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                currency TEXT NOT NULL, amount INTEGER NOT NULL,
+                invoice_payload TEXT NOT NULL, provider_charge_id TEXT NOT NULL,
+                reason TEXT NOT NULL, created_at TEXT NOT NULL
+            )""")
+            prior = conn.execute('SELECT 1 FROM payment_review WHERE charge_id = ?',
+                                 (telegram_charge_id,)).fetchone()
+            if prior:
+                return 'review_required', None
+            existing = conn.execute('SELECT * FROM payments WHERE telegram_payment_charge_id = ?',
+                                    (telegram_charge_id,)).fetchone()
+            if existing:
+                if (str(user_id) != existing['user_id'] or currency != existing['currency'] or
+                        total_amount != existing['total_amount'] or
+                        invoice_payload != existing['invoice_payload'] or
+                        provider_charge_id != existing['provider_payment_charge_id']):
+                    self._log_audit_conn(conn, 'payment_duplicate_mismatch', order_id=existing['order_id'])
+                    return 'mismatch', None
+                row = conn.execute('SELECT * FROM orders WHERE order_id = ?',
+                                   (existing['order_id'],)).fetchone()
+                if existing['status'] != 'paid' or row is None or row['status'] not in ('paid', 'delivered', 'delivery_failed'):
+                    return 'review_required', None
+                return 'duplicate_charge', dict(row)
+            row = conn.execute('SELECT * FROM orders WHERE invoice_payload = ?',
+                               (invoice_payload,)).fetchone()
+            order = dict(row) if row else None
+            reason = ''
+            if (order is None or currency != 'XTR' or total_amount != order['amount_xtr'] or
+                    str(user_id) != order['user_id']):
+                reason = 'payment_mismatch'
+            elif conn.execute('SELECT 1 FROM payments WHERE order_id = ?',
+                              (order['order_id'],)).fetchone():
+                reason = 'additional_charge'
+            elif order['status'] != 'pre_checkout_ok':
+                reason = 'unexpected_order_state'
+            if reason:
+                conn.execute('INSERT INTO payment_review VALUES (?,?,?,?,?,?,?,?)',
+                             (telegram_charge_id, str(user_id), currency, total_amount,
+                              invoice_payload, provider_charge_id, reason, now))
+                self._log_audit_conn(conn, 'payment_mismatch' if reason == 'payment_mismatch' else 'payment_needs_review',
+                                     actor_id=str(user_id), order_id=order['order_id'] if order else '',
+                                     product_id=order['product_id'] if order else '', details={'reason': reason})
+                return 'review_required', None
+            conn.execute("""INSERT INTO payments (order_id, user_id, currency, total_amount,
+                         invoice_payload, telegram_payment_charge_id, provider_payment_charge_id, status, created_at)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)""",
+                         (order['order_id'], str(user_id), currency, total_amount, invoice_payload,
+                          telegram_charge_id, provider_charge_id, now))
+            conn.execute("UPDATE orders SET status = 'paid', updated_at = ? WHERE order_id = ?",
+                         (now, order['order_id']))
+            self._log_audit_conn(conn, 'payment_received', actor_id=str(user_id),
+                                 order_id=order['order_id'], product_id=order['product_id'],
+                                 details={'amount_xtr': total_amount})
             order['status'] = 'paid'
             return 'recorded', order
 
