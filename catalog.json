@@ -1,0 +1,39 @@
+{
+  "studio": "NAUM AI Creative Studio",
+  "telegram_contact": "https://t.me/",
+  "items": [
+    {
+      "id": "ny-kyiv-01",
+      "category": "newyear",
+      "category_label": "Новогодние открытки",
+      "title": "Новогодний Киев — Неоновый Майдан",
+      "description": "Праздничная открытка 16:9 / 4K для печати и соцсетей.",
+      "format": "PNG · 4K",
+      "price_uah": 150,
+      "image": "",
+      "badge": "Пример"
+    },
+    {
+      "id": "ps-pack-01",
+      "category": "photoshop",
+      "category_label": "Для Photoshop",
+      "title": "Зимний неон и световые эффекты (Overlay)",
+      "description": "Набор фонов и световых слоёв для обложек и превью YouTube.",
+      "format": "PNG / PSD",
+      "price_uah": 200,
+      "image": "",
+      "badge": "Пример"
+    },
+    {
+      "id": "3d-ref-01",
+      "category": "3d",
+      "category_label": "Для 3D-принтера",
+      "title": "Новогодний дракон / талисман (референс)",
+      "description": "Высококонтрастный концепт-арт для последующей 3D-печати.",
+      "format": "PNG 1:1",
+      "price_uah": 250,
+      "image": "",
+      "badge": "Пример"
+    }
+  ]
+}

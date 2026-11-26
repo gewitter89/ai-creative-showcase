@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NAUM AI Creative Studio — Открытки, Photoshop, 3D</title>
+<style>
+:root{--bg:#090d16;--card:#111827;--border:rgba(255,255,255,.1);--text:#f8fafc;--muted:#94a3b8;--accent:#3b82f6}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);line-height:1.5}
+.wrap{max-width:1120px;margin:0 auto;padding:24px 16px}
+header{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding-bottom:20px;border-bottom:1px solid var(--border)}
+h1{margin:0;font-size:24px}
+.sub{color:var(--muted);font-size:14px;margin:4px 0 0}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}
+.btn{border:1px solid var(--border);background:var(--card);color:var(--text);padding:8px 14px;border-radius:10px;cursor:pointer;font-size:14px;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
+.btn.active,.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.search{flex:1;min-width:200px;padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.thumb{height:190px;background:linear-gradient(135deg,#1e1b4b,#0f172a 60%,#1e3a8a);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;position:relative}
+.thumb img{width:100%;height:100%;object-fit:cover}
+.badge{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.65);padding:3px 8px;border-radius:6px;font-size:11px;border:1px solid var(--border)}
+.body{padding:14px;flex:1;display:flex;flex-direction:column;gap:8px}
+.cat{font-size:12px;color:#60a5fa;font-weight:600}
+.title{font-size:16px;font-weight:700;margin:0}
+.desc{font-size:13px;color:var(--muted);margin:0;flex:1}
+.foot{display:flex;justify-content:space-between;align-items:center;padding-top:10px;border-top:1px solid var(--border)}
+.price{font-weight:700;font-size:15px}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <header>
+  <div>
+   <h1>NAUM AI Creative Studio</h1>
+   <p class="sub">Новогодние открытки, ассеты для Photoshop и концепты для 3D-принтеров</p>
+  </div>
+  <a id="tg-top" class="btn primary" href="https://t.me/" target="_blank" rel="noopener">Заказать в Telegram</a>
+ </header>
+ <div class="filters">
+  <button class="btn active" data-cat="all">Все работы</button>
+  <button class="btn" data-cat="newyear">🎄 Новогодние открытки</button>
+  <button class="btn" data-cat="photoshop">🎨 Для Photoshop</button>
+  <button class="btn" data-cat="3d">🖨 Для 3D-принтера</button>
+  <input id="q" class="search" type="search" placeholder="Поиск по названию или описанию...">
+ </div>
+ <div id="grid" class="grid"></div>
+</div>
+<script>
+let catalog={items:[],telegram_contact:'https://t.me/'};
+let cat='all';
+function E(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function render(){
+ const q=(document.getElementById('q').value||'').trim().toLowerCase();
+ const list=catalog.items.filter(x=>(cat==='all'||x.category===cat)&&(!q||(x.title+' '+x.description).toLowerCase().includes(q)));
+ document.getElementById('grid').innerHTML=list.map(x=>`
+  <article class="card">
+   <div class="thumb">${x.image?`<img src="${E(x.image)}" alt="${E(x.title)}">`:`<span>Превью · ${E(x.format)}</span>`}<span class="badge">${E(x.badge||x.format)}</span></div>
+   <div class="body">
+    <div class="cat">${E(x.category_label)}</div>
+    <h2 class="title">${E(x.title)}</h2>
+    <p class="desc">${E(x.description)}</p>
+    <div class="foot">
+     <span class="price">${Number(x.price_uah||0)} грн</span>
+     <a class="btn" href="${E(catalog.telegram_contact)}" target="_blank" rel="noopener">Заказать</a>
+    </div>
+   </div>
+  </article>`).join('')||'<p class="sub">По вашему запросу ничего не найдено.</p>';
+}
+document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('[data-cat]').forEach(x=>x.classList.remove('active'));
+ b.classList.add('active');cat=b.dataset.cat;render();
+});
+document.getElementById('q').oninput=render;
+fetch('./catalog.json').then(r=>r.json()).then(d=>{catalog=d;if(d.telegram_contact)document.getElementById('tg-top').href=d.telegram_contact;render()}).catch(render);
+</script>
+</body>
+</html>
