@@ -52,7 +52,7 @@ def test_callback_radar_build_queues_task_for_owner(tmp_path, monkeypatch):
     q = json.loads(queue_file.read_text(encoding="utf-8"))
     assert len(q) == 1
     assert q[0]["source_id"] == "gh:123"
-    assert any(m == "sendMessage" and "Поставлено в очередь облака" in p["text"] for m, p in calls)
+    assert any(m == "sendMessage" and "Принято:" in p["text"] for m, p in calls)
 
 
 def test_callback_blocked_for_non_owner(tmp_path):
@@ -84,3 +84,37 @@ def test_callback_blocked_for_non_owner(tmp_path):
     bot.process_update(upd, cfg, api_fn=fake_api)
     assert calls[0][0] == "answerCallbackQuery"
     assert calls[0][1]["show_alert"] is True
+
+
+def test_idea_command_queues_for_owner(tmp_path, monkeypatch):
+    queue_file = tmp_path / "queue.json"
+    monkeypatch.setenv("STUDIO_AUTOPILOT_QUEUE", str(queue_file))
+    calls = []
+    def fake_api(token, method, payload=None):
+        calls.append((method, payload))
+        return {"ok": True, "result": {}}
+
+    cfg = bot.BotConfig(
+        token="123:TEST",
+        owner_ids={'7636868692'},
+        repo=tmp_path,
+        private_dir=tmp_path / "priv",
+        auto_push=False,
+        push_branch="feat/production-batch-01",
+        db_path=tmp_path / "store.db",
+        packages_dir=tmp_path / "pkg",
+        payments_enabled=False,
+    )
+    upd = {
+        "update_id": 3,
+        "message": {
+            "from": {"id": 7636868692},
+            "chat": {"id": 7636868692, "type": "private"},
+            "text": "/idea Сделать генератор обложек",
+        },
+    }
+    bot.process_update(upd, cfg, api_fn=fake_api)
+    q = json.loads(queue_file.read_text(encoding="utf-8"))
+    assert len(q) == 1
+    assert "Сделать генератор обложек" in q[0]["title"]
+    assert any("Идея в работе" in p["text"] for _, p in calls)

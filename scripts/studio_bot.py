@@ -879,7 +879,33 @@ def _queue_radar_task(source_id: str) -> tuple[bool, str]:
     })
     queue_file.parent.mkdir(parents=True, exist_ok=True)
     queue_file.write_text(_json.dumps(queue, ensure_ascii=False, indent=2), encoding='utf-8')
-    return True, f'🚀 Поставлено в очередь облака: {title}\nАвтопилот (таймер до 3 мин) подхватит задачу и откроет ветку на GitHub.'
+    return True, f'🚀 Принято: {title}\nОблако заберёт задачу в течение 3 минут, сделает прототип + демо-страницу и откроет ветку на GitHub.'
+
+
+def _queue_custom_idea(idea_text: str) -> tuple[bool, str]:
+    """Enqueue a free-form owner idea into the cloud autopilot queue."""
+    import json as _json
+    import re as _re
+    clean = idea_text.strip()
+    if len(clean) < 4:
+        return False, 'Напиши идею после команды, например: /idea Сделать бота для обложек YouTube'
+    queue_file = Path(os.environ.get('STUDIO_AUTOPILOT_QUEUE', '/var/lib/naum-studio/autopilot_queue.json'))
+    queue = _json.loads(queue_file.read_text(encoding='utf-8')) if queue_file.is_file() else []
+    slug = _re.sub(r'[^a-z0-9]+', '-', clean.lower()).strip('-')[:24] or 'custom-idea'
+    queue.append({
+        'id': f'idea-{slug}',
+        'title': f'Идея владельца: {clean[:60]}',
+        'prompt': (
+            f'Ты — облачный Antigravity на VPS (инстанс Kyiv-AI-Pro, --remote-control). '
+            f'Владелец прислал идею через /idea в Telegram: "{clean}".\n'
+            f'Задача: спроектируй простой и рабочий MVP на отдельной ветке (НЕ в main) в /opt/ai-projects/{slug} '
+            f'(или модулем в /opt/ai-creative-showcase), добавь простую демо-страницу и автотесты pytest, '
+            f'прогони pytest -q, создай/обнови ветку на GitHub и коротко отчитайся.'
+        ),
+    })
+    queue_file.parent.mkdir(parents=True, exist_ok=True)
+    queue_file.write_text(_json.dumps(queue, ensure_ascii=False, indent=2), encoding='utf-8')
+    return True, f'💡 Идея в работе: «{clean[:60]}»\nОблачный агент соберёт прототип и покажет результат.'
 
 
 def _cloud_status_text() -> str:
@@ -1108,12 +1134,20 @@ def process_update(
         )
         return
 
+    if cmd == '/idea':
+        if not admin:
+            return
+        idea_body = text[len('/idea'):].strip()
+        ok, reply = _queue_custom_idea(idea_body)
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': reply})
+        return
+
     if cmd in ('/panel', '/menu'):
         if not admin:
             return
         api_fn(cfg.token, 'sendMessage', {
             'chat_id': chat_id,
-            'text': '🎛 Пульт управления NAUM Studio:',
+            'text': '🎛 Пульт студии (нажми любую кнопку):\n• Разведка — найти новые идеи\n• Облако — что сейчас делают агенты\n• Продажи — сколько заявок и Stars\n• Своя идея — напиши /idea и текст',
             'reply_markup': {'inline_keyboard': [
                 [{'text': '📡 Запустить разведку сейчас', 'callback_data': 'panel_radar'}],
                 [{'text': '🤖 Статус облака и очереди', 'callback_data': 'panel_cloud'}],
