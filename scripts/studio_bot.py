@@ -2,6 +2,7 @@
 """Telegram store and intake bot for NAUM AI Creative Studio."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -15,11 +16,20 @@ from typing import AbstractSet, Callable, Mapping
 
 from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID, build_demo_postcard_package
 from ingest_asset import ID_RE, MAX_INPUT_BYTES, ingest_asset, sha256_file
+from kids_greeting import (
+    generate_nicholas_audio,
+    parse_greeting_args,
+    render_certificate,
+    render_video_greeting,
+)
 from store_db import (
     CLIP_FREE_TRIAL_LIMIT,
     CLIP_PRICE_XTR,
     CLIP_PRODUCT_ID,
     DEFAULT_DB_PATH,
+    KIDS_VIDEO_PRICE_UAH,
+    KIDS_VIDEO_PRICE_XTR,
+    KIDS_VIDEO_PRODUCT_ID,
     StoreDB,
 )
 from package_version import staged_order_package
@@ -488,6 +498,95 @@ def _deliver_paid_clip_order(
                         order_id=order['order_id'], product_id=order['product_id'])
 
 
+def _deliver_paid_kids_video_order(
+    order: dict,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB,
+    api_fn: Callable[[str, str, dict | None], dict],
+    download_fn: Callable[[str, str, Path], None],
+    send_video_fn: Callable[[str, int | str, Path, str], dict],
+) -> None:
+    """Render and deliver a paid Stars 9:16 personalized kids greeting video idempotently."""
+    job = store.reserve_kids_video_delivery(order['order_id'])
+    if job is None:
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix='naum_kids_paid_') as tmp_str:
+            tmp_dir = Path(tmp_str)
+            audio_path = tmp_dir / 'greeting.mp3'
+            video_path = tmp_dir / 'greeting_9_16.mp4'
+            photo_path: Path | None = None
+            if job.get('photo_file_id'):
+                finfo = api_fn(cfg.token, f"getFile?file_id={job['photo_file_id']}", None)['result']
+                suffix = Path(finfo['file_path']).suffix or '.jpg'
+                photo_path = tmp_dir / f'child{suffix}'
+                download_fn(cfg.token, finfo['file_path'], photo_path)
+
+            asyncio.run(
+                generate_nicholas_audio(
+                    child_name=job['child_name'],
+                    good_deed=job.get('good_deed') or '',
+                    out_mp3=audio_path,
+                    lang=job.get('lang') or 'uk',
+                    age=job.get('age'),
+                    city=job.get('city') or '',
+                    persona=job.get('persona') or 'mykolay',
+                )
+            )
+            render_video_greeting(
+                repo_root=cfg.repo,
+                child_name=job['child_name'],
+                audio_path=audio_path,
+                out_video_path=video_path,
+                child_photo_path=photo_path,
+                age=job.get('age'),
+                city=job.get('city') or '',
+                good_deed=job.get('good_deed') or '',
+                lang=job.get('lang') or 'uk',
+                persona=job.get('persona') or 'mykolay',
+            )
+            caption = (
+                f"🎬 Чарівна HD-листівка 9:16 для {job['child_name']} готова!\n"
+                f"Замовлення: {order['order_id']} · NAUM AI Creative Studio"
+                if (job.get('lang') or 'uk') == 'uk'
+                else f"🎬 Волшебная HD-открытка 9:16 для {job['child_name']} готова!\n"
+                f"Заказ: {order['order_id']} · NAUM AI Creative Studio"
+            )
+            resp = send_video_fn(cfg.token, chat_id, video_path, caption)
+            res_obj = (resp or {}).get('result') or {}
+            media_obj = res_obj.get('video') or res_obj.get('document') or {}
+            file_id = str(media_obj.get('file_id') or '')
+            if not isinstance(resp, dict) or resp.get('ok') is not True or not file_id:
+                raise RuntimeError('Telegram did not confirm video delivery')
+            out_sha = sha256_file(video_path)
+
+        store.create_or_get_delivery(order, Path(f"{job['job_id']}.mp4"), out_sha)
+        store.mark_delivery_sent(order['order_id'], telegram_file_id=file_id)
+        store.mark_kids_job_delivered(job['job_id'], telegram_file_id=file_id)
+    except Exception as exc:
+        err = _sanitize_error(exc, cfg.token)
+        store.mark_kids_job_failed(job['job_id'], err)
+        store.create_or_get_delivery(order, Path(f"{job['job_id']}.mp4"), 'kids-video-failed')
+        store.mark_delivery_failed(order['order_id'], err)
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': f"Не удалось собрать видео по заказу {order['order_id']}. Обратитесь в /paysupport."},
+        )
+        return
+
+    try:
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': f"Спасибо за покупку! Видео-поздравление по заказу {order['order_id']} доставлено. /myorders · /paysupport"},
+        )
+    except Exception:
+        store.log_audit('delivery_notification_failed', actor_id=str(order['user_id']),
+                        order_id=order['order_id'], product_id=order['product_id'])
+
+
 def _deliver_paid_order(
     order: dict,
     chat_id: int | str,
@@ -589,6 +688,12 @@ def _handle_successful_payment(
         if str(chat_id) != str(order['chat_id']) or str(chat_id) != str(order['user_id']):
             return
         _deliver_paid_clip_order(order, chat_id, cfg, store, api_fn, download_fn, send_video_fn, clip_fn)
+        return
+
+    if order['product_id'] == KIDS_VIDEO_PRODUCT_ID:
+        if str(chat_id) != str(order['chat_id']) or str(chat_id) != str(order['user_id']):
+            return
+        _deliver_paid_kids_video_order(order, chat_id, cfg, store, api_fn, download_fn, send_video_fn)
         return
 
     _deliver_paid_order(
@@ -1075,6 +1180,56 @@ def send_telegram_photo(token: str, chat_id: int | str, file_path: Path, caption
     with _req.urlopen(req, timeout=30) as resp:
         return _json.loads(resp.read().decode('utf-8'))
 
+
+def send_telegram_audio(
+    token: str,
+    chat_id: int | str,
+    file_path: Path,
+    caption: str = '',
+    title: str = '',
+    performer: str = 'NAUM AI Studio',
+) -> dict:
+    """Send an MP3 audio greeting via Telegram Bot API sendAudio."""
+    boundary = f'----naumAudio{uuid.uuid4().hex}'
+    parts: list[bytes] = []
+
+    def add_field(name: str, value: str) -> None:
+        parts.append(
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f'{value}\r\n'.encode('utf-8')
+        )
+
+    add_field('chat_id', str(chat_id))
+    if caption:
+        add_field('caption', caption[:1024])
+    if title:
+        add_field('title', title[:64])
+    if performer:
+        add_field('performer', performer[:64])
+
+    file_bytes = file_path.read_bytes()
+    parts.append(
+        f'--{boundary}\r\n'
+        f'Content-Disposition: form-data; name="audio"; filename="{file_path.name}"\r\n'
+        f'Content-Type: audio/mpeg\r\n\r\n'.encode('utf-8')
+    )
+    parts.append(file_bytes)
+    parts.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+
+    body = b''.join(parts)
+    req = urllib.request.Request(
+        f'https://api.telegram.org/bot{token}/sendAudio',
+        data=body,
+        headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+    if not res.get('ok'):
+        raise RuntimeError(f"Telegram sendAudio failed: {res.get('description', 'unknown error')}")
+    return res
+
 def _queue_radar_task(source_id: str) -> tuple[bool, str]:
     """Read signal from radar.db and enqueue a cloud GitHub MVP task."""
     import json as _json
@@ -1162,17 +1317,109 @@ def _cloud_status_text() -> str:
     )
 
 
+def _handle_kids_video_callback(
+    cb_id: str,
+    job_id: str,
+    user_id: str,
+    username: str,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB | None,
+    api_fn: Callable[[str, str, dict | None], dict],
+) -> None:
+    """Handle customer inline button click to buy HD 9:16 kids greeting video (45 Stars / 39 UAH)."""
+    if store is None:
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Сервіс тимчасово недоступний.'})
+        return
+
+    job = store.get_kids_job(job_id)
+    if job is None or str(job['user_id']) != str(user_id):
+        api_fn(
+            cfg.token,
+            'answerCallbackQuery',
+            {'callback_query_id': cb_id, 'text': 'Заявка не знайдена. Спробуйте команду /mykolay або /santa ще раз.', 'show_alert': True},
+        )
+        return
+
+    lang = job.get('lang') or 'uk'
+    if not cfg.payments_enabled:
+        store.log_audit('kids_paywall_paused', actor_id=user_id, product_id=KIDS_VIDEO_PRODUCT_ID, details={'job_id': job_id})
+        api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': f'{KIDS_VIDEO_PRICE_UAH} грн / {KIDS_VIDEO_PRICE_XTR} Stars'})
+        msg_text = (
+            f"🎬 Повне HD-відео 9:16 зі сказкою та золотою книгою для {job['child_name']} "
+            f"коштує {KIDS_VIDEO_PRICE_UAH} грн ({KIDS_VIDEO_PRICE_XTR} Stars XTR).\n"
+            f"Аудіо-привітання та Грамота — безкоштовно! Оплата Telegram Stars очікує ввімкнення власником (/support)."
+            if lang == 'uk'
+            else f"🎬 Полное HD-видео 9:16 со сказкой и волшебной книгой для {job['child_name']} "
+            f"стоит {KIDS_VIDEO_PRICE_UAH} грн ({KIDS_VIDEO_PRICE_XTR} Stars XTR).\n"
+            f"Аудио-поздравление и Грамота — бесплатно! Оплата Telegram Stars ожидает включения владельцем (/support)."
+        )
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': msg_text})
+        return
+
+    api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Готую рахунок Stars...'})
+    order, paid_job = store.create_kids_paid_order(
+        job_id=job_id,
+        user_id=user_id,
+        chat_id=str(chat_id),
+        username=username,
+        price_xtr=KIDS_VIDEO_PRICE_XTR,
+    )
+    title = f"HD-відео для {job['child_name']}"[:32] if lang == 'uk' else f"HD-видео для {job['child_name']}"[:32]
+    desc = (
+        f"Персональне святкове відео 9:16 (книга казок + дзвіночки + голос) — {KIDS_VIDEO_PRICE_UAH} грн."
+        if lang == 'uk'
+        else f"Персональное праздничное видео 9:16 (книга сказок + колокольчики + голос) — {KIDS_VIDEO_PRICE_UAH} грн."
+    )
+    res = api_fn(
+        cfg.token,
+        'sendInvoice',
+        {
+            'chat_id': chat_id,
+            'title': title,
+            'description': desc[:255],
+            'payload': order['invoice_payload'],
+            'provider_token': '',
+            'currency': 'XTR',
+            'prices': [{'label': title, 'amount': int(order['amount_xtr'])}],
+            'start_parameter': 'kids_video',
+        },
+    )
+    if isinstance(res, dict) and res.get('ok') is False:
+        store.update_order_status(order['order_id'], 'cancelled', actor_id=user_id, details={'error': res})
+        store.mark_kids_job_failed(paid_job['job_id'], 'sendInvoice rejected')
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': 'Не удалось выставить счёт Stars. Попробуйте позже или напишите в /paysupport.'},
+        )
+    else:
+        store.update_order_status(order['order_id'], 'invoice_sent', actor_id=user_id)
+
+
 def _handle_callback_query(upd: dict, cfg: BotConfig, store, api_fn) -> None:
     cb = upd.get('callback_query') or {}
     cb_id = cb.get('id')
     cb_msg = cb.get('message') or {}
     chat = cb_msg.get('chat') or {}
     chat_id = chat.get('id')
-    fake_msg = {'from': cb.get('from') or {}, 'chat': chat}
+    cb_from = cb.get('from') or {}
+    fake_msg = {'from': cb_from, 'chat': chat}
+    data = (cb.get('data') or '').strip()
+
+    if data.startswith('kids_video:'):
+        if not is_private_chat(fake_msg) or not chat_id:
+            api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Напишіть боту в особисті повідомлення.', 'show_alert': True})
+            return
+        job_id = data.split(':', 1)[1].strip()
+        user_id = str(cb_from.get('id') or chat_id)
+        username = str(cb_from.get('username') or '').strip()
+        _handle_kids_video_callback(cb_id, job_id, user_id, username, chat_id, cfg, store, api_fn)
+        return
+
     if not (is_owner(fake_msg, cfg.owner_ids) and is_private_chat(fake_msg)):
         api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id, 'text': 'Доступ только для владельца в личке.', 'show_alert': True})
         return
-    data = (cb.get('data') or '').strip()
     if data.startswith('radar_build:'):
         sid = data.split(':', 1)[1]
         ok, reply = _queue_radar_task(sid)
@@ -1372,6 +1619,126 @@ def _handle_clip_command(
         store.update_order_status(order['order_id'], 'invoice_sent', actor_id=user_id)
 
 
+def _handle_kids_command(
+    cmd: str,
+    msg: dict,
+    effective_text: str,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB | None,
+    api_fn: Callable[[str, str, dict | None], dict],
+    send_photo_fn: Callable[..., dict],
+    send_audio_fn: Callable[..., dict],
+) -> None:
+    """Handle /mykolay and /santa: FREE voice greeting with bells + 1200x800 Diploma, plus 39 UAH / 45 Stars HD video upsell."""
+    raw_args = effective_text[len(cmd):].strip()
+    req = parse_greeting_args(raw_args, command=cmd)
+    if req is None:
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {
+                'chat_id': chat_id,
+                'text': (
+                    '🎅 Персональне привітання для дитини (UA / RU):\n'
+                    'Напишіть: ім’я, вік, місто та добру справу за рік.\n\n'
+                    'Приклади:\n'
+                    '• /mykolay Артемчик, 6, Київ, слухав маму і читав книжки\n'
+                    '• /santa Маша, 7, Одесса, помогала бабушке и учила стихи\n\n'
+                    '🎁 Аудіо з дзвіночками + іменна Грамота — БЕЗКОШТОВНО!\n'
+                    f'🎬 Повне HD-відео 9:16 зі сказкою — всього {KIDS_VIDEO_PRICE_UAH} грн ({KIDS_VIDEO_PRICE_XTR} Stars).'
+                ),
+            },
+        )
+        return
+
+    user_id = str(get_sender_id(msg) or chat_id)
+    username = str((msg.get('from') or {}).get('username') or '').strip()
+    photo_list = msg.get('photo') or []
+    photo_file_id = str(photo_list[-1].get('file_id') or '') if photo_list else ''
+
+    try:
+        with tempfile.TemporaryDirectory(prefix='naum_kids_free_') as tmp_str:
+            tmp_dir = Path(tmp_str)
+            cert_path = tmp_dir / 'certificate.jpg'
+            audio_path = tmp_dir / 'greeting.mp3'
+
+            render_certificate(
+                repo_root=cfg.repo,
+                child_name=req.child_name,
+                city=req.city,
+                out_path=cert_path,
+                age=req.age,
+                good_deed=req.good_deed,
+                lang=req.lang,
+                persona=req.persona,
+            )
+            asyncio.run(
+                generate_nicholas_audio(
+                    child_name=req.child_name,
+                    good_deed=req.good_deed,
+                    out_mp3=audio_path,
+                    lang=req.lang,
+                    age=req.age,
+                    city=req.city,
+                    persona=req.persona,
+                )
+            )
+
+            job_id = 'demo'
+            if store is not None:
+                lead_job = store.create_kids_lead_job(
+                    user_id=user_id,
+                    chat_id=str(chat_id),
+                    username=username,
+                    child_name=req.child_name,
+                    age=req.age,
+                    city=req.city,
+                    good_deed=req.good_deed,
+                    lang=req.lang,
+                    persona=req.persona,
+                    photo_file_id=photo_file_id,
+                )
+                job_id = lead_job['job_id']
+
+            if req.lang == 'uk':
+                cert_caption = (
+                    f"📜 Іменна Грамота чемної дитини для {req.child_name} (безкоштовно)!\n"
+                    f"Надсилайте матусям у чати — кожен може зробити через /mykolay або /santa.\n\n"
+                    f"Хочете повне HD-відео 9:16 з книгою казок та дзвіночками за {KIDS_VIDEO_PRICE_UAH} грн ({KIDS_VIDEO_PRICE_XTR} Stars)?"
+                )
+                btn_text = f"🎬 Повне HD-відео 9:16 ({KIDS_VIDEO_PRICE_UAH} грн / {KIDS_VIDEO_PRICE_XTR} Stars)"
+                audio_title = f"Привітання для {req.child_name}"
+                audio_caption = f"🔔 Чарівне голосове привітання з дзвіночками для {req.child_name}!"
+            else:
+                cert_caption = (
+                    f"📜 Именная Грамота вежливого ребёнка для {req.child_name} (бесплатно)!\n"
+                    f"Делитесь в чатах — каждый может сделать через /santa или /mykolay.\n\n"
+                    f"Хотите полное HD-видео 9:16 с книгой сказок и колокольчиками за {KIDS_VIDEO_PRICE_UAH} грн ({KIDS_VIDEO_PRICE_XTR} Stars)?"
+                )
+                btn_text = f"🎬 Полное HD-видео 9:16 ({KIDS_VIDEO_PRICE_UAH} грн / {KIDS_VIDEO_PRICE_XTR} Stars)"
+                audio_title = f"Поздравление для {req.child_name}"
+                audio_caption = f"🔔 Волшебное голосовое поздравление с колокольчиками для {req.child_name}!"
+
+            send_photo_fn(
+                cfg.token,
+                chat_id,
+                cert_path,
+                cert_caption,
+                {'inline_keyboard': [[{'text': btn_text, 'callback_data': f'kids_video:{job_id}'}]]},
+            )
+            send_audio_fn(
+                cfg.token,
+                chat_id,
+                audio_path,
+                caption=audio_caption,
+                title=audio_title,
+                performer='NAUM AI Studio',
+            )
+    except Exception as exc:
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': f'Помилка створення привітання: {_sanitize_error(exc, cfg.token)}'})
+
+
 def process_update(
     upd: dict,
     cfg: BotConfig,
@@ -1382,6 +1749,7 @@ def process_update(
     send_document_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_document,
     send_photo_fn: Callable[..., dict] = send_telegram_photo,
     send_video_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_video,
+    send_audio_fn: Callable[..., dict] = send_telegram_audio,
     clip_fn: Callable[[str | Path, Path], dict] = clip_video,
 ) -> None:
     """Process a single Telegram update with strict role separation and private-chat admin checks."""
@@ -1469,7 +1837,7 @@ def process_update(
                     'text': (
                         f"Здравствуйте! Заявка по NAUM AI Creative Studio ({arg or 'общий запрос'}) принята.\n"
                         f"Бесплатная демо-открытка: /start demo_ny\n"
-                        f"Доступные команды: /clip, /catalog, /myorders, /support, /paysupport."
+                        f"Доступные команды: /mykolay, /santa, /clip, /catalog, /myorders, /support, /paysupport."
                     ),
                 },
             )
@@ -1501,39 +1869,18 @@ def process_update(
         )
         return
 
-    if cmd in ('/mykolay', '/santa'):
-        parts = text[len(cmd):].strip().split(maxsplit=1)
-        name = parts[0] if parts else ""
-        deed = parts[1] if len(parts) > 1 else ""
-        if not name:
-            api_fn(cfg.token, 'sendMessage', {
-                'chat_id': chat_id,
-                'text': '🎅 Напишіть ім\'я дитини (і за що похвалити):\nНаприклад:\n/mykolay Артемчик слухав маму\n\nІ я за 10 секунд зроблю іменну Грамоту та казку!',
-            })
-            return
-        try:
-            import asyncio, scripts.kids_greeting as kg
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as c_tmp:
-                c_path = Path(c_tmp.name)
-            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as a_tmp:
-                a_path = Path(a_tmp.name)
-            try:
-                kg.render_certificate(cfg.repo, name, "Україна", c_path)
-                asyncio.run(kg.generate_nicholas_audio(name, deed, a_path, lang="uk"))
-                send_photo_fn(
-                    cfg.token,
-                    chat_id,
-                    c_path,
-                    f'📜 Грамота чемної дитини для {name}!\n\nХочете повне святкове відео 9:16 зі скарбами та фото малюка всього за 39 грн (45 Stars)? Натисніть кнопку нижче:',
-                    {'inline_keyboard': [[{'text': '🎬 Замовити персональне відео (39 грн)', 'callback_data': f'buy_video:{name[:18]}'}]]}
-                )
-                if store is not None:
-                    store.log_event('kids_greeting_created', user_id=str(get_sender_id(msg) or chat_id), details={'name': name})
-            finally:
-                c_path.unlink(missing_ok=True)
-                a_path.unlink(missing_ok=True)
-        except Exception as exc:
-            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': f'Помилка створення привітання: {_sanitize_error(exc, cfg.token)}'})
+    if cmd in ('/mykolay', '/santa') or (not text and caption_cmd in ('/mykolay', '/santa')):
+        _handle_kids_command(
+            cmd=cmd or caption_cmd,
+            msg=msg,
+            effective_text=text or caption_text,
+            chat_id=chat_id,
+            cfg=cfg,
+            store=store,
+            api_fn=api_fn,
+            send_photo_fn=send_photo_fn,
+            send_audio_fn=send_audio_fn,
+        )
         return
 
     if cmd == '/card':
@@ -1559,7 +1906,7 @@ def process_update(
                     markup,
                 )
                 if store is not None:
-                    store.log_event('viral_card_created', user_id=str(get_sender_id(msg) or chat_id), details={'name': raw_name[:28]})
+                    store.log_audit('viral_card_created', actor_id=str(get_sender_id(msg) or chat_id), details={'name': raw_name[:28]})
             finally:
                 card_path.unlink(missing_ok=True)
         except Exception as exc:

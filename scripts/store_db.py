@@ -20,6 +20,9 @@ DEMO_PRODUCT_ID = 'demo-ny'
 CLIP_PRODUCT_ID = 'ai-video-clip'
 CLIP_FREE_TRIAL_LIMIT = 2
 CLIP_PRICE_XTR = 50
+KIDS_VIDEO_PRODUCT_ID = 'kids-greeting-video'
+KIDS_VIDEO_PRICE_XTR = 45
+KIDS_VIDEO_PRICE_UAH = 39
 
 
 def utc_now_iso() -> str:
@@ -163,11 +166,32 @@ class StoreDB:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS kids_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    child_name TEXT NOT NULL,
+                    age INTEGER,
+                    city TEXT NOT NULL DEFAULT '',
+                    good_deed TEXT NOT NULL DEFAULT '',
+                    lang TEXT NOT NULL DEFAULT 'uk',
+                    persona TEXT NOT NULL DEFAULT 'mykolay',
+                    photo_file_id TEXT NOT NULL DEFAULT '',
+                    order_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    telegram_file_id TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_order_id ON audit_events(order_id);
                 CREATE INDEX IF NOT EXISTS idx_clip_jobs_user ON clip_jobs(user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_clip_jobs_order ON clip_jobs(order_id);
+                CREATE INDEX IF NOT EXISTS idx_kids_jobs_order ON kids_jobs(order_id);
                 """
             )
         if self.db_path.exists():
@@ -523,6 +547,13 @@ class StoreDB:
                 ).fetchone()
                 if not product or product['status'] != 'готов к продаже' or not clip_row:
                     return reject('Задание на нарезку клипа недоступно или устарело.')
+            elif order['product_id'] == KIDS_VIDEO_PRODUCT_ID:
+                kids_row = conn.execute(
+                    'SELECT * FROM kids_jobs WHERE order_id = ?',
+                    (order['order_id'],),
+                ).fetchone()
+                if not product or product['status'] != 'готов к продаже' or not kids_row:
+                    return reject('Задание на создание детского видео недоступно или устарело.')
             else:
                 if not product or int(product['package_ready']) != 1 or product['status'] != 'готов к продаже':
                     return reject('Товар временно недоступен для покупки.')
@@ -1153,5 +1184,205 @@ class StoreDB:
                 actor_id=row['user_id'] if row else '',
                 order_id=row['order_id'] if row else '',
                 product_id=CLIP_PRODUCT_ID,
+                details={'job_id': job_id, 'error': error[:500]},
+            )
+
+    def _ensure_kids_product_conn(
+        self,
+        conn: sqlite3.Connection,
+        price_xtr: int = KIDS_VIDEO_PRICE_XTR,
+        price_uah: int = KIDS_VIDEO_PRICE_UAH,
+    ) -> None:
+        """Ensure the personalized kids HD 9:16 video product exists in products table."""
+        now = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO products (
+                product_id, category, title, description, package_contents,
+                price_uah, price_xtr, status, package_ready, package_path,
+                package_sha256, package_bytes, active_version, updated_at
+            ) VALUES (?, 'video', 'Именное HD-видео 9:16 для ребёнка', ?, 'Вертикальное видео 1080x1920 MP4 с книгой сказок, колокольчиками и голосом',
+                ?, ?, 'готов к продаже', 0, '', '', 0, 1, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                price_uah = excluded.price_uah,
+                price_xtr = excluded.price_xtr,
+                status = 'готов к продаже',
+                updated_at = excluded.updated_at
+            """,
+            (
+                KIDS_VIDEO_PRODUCT_ID,
+                'Персональное видео-поздравление 9:16 от Святого Николая / Деда Мороза / Санты.',
+                int(price_uah),
+                int(price_xtr),
+                now,
+            ),
+        )
+
+    def create_kids_lead_job(
+        self,
+        user_id: str,
+        chat_id: str,
+        username: str,
+        child_name: str,
+        age: int | None,
+        city: str,
+        good_deed: str,
+        lang: str,
+        persona: str,
+        photo_file_id: str = '',
+    ) -> dict:
+        """Store a free lead-magnet greeting job so the user can upgrade to paid HD 9:16 video."""
+        uid = str(user_id)
+        now = utc_now_iso()
+        job_id = f'kids_{uuid.uuid4().hex[:14]}'
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute(
+                """
+                INSERT INTO kids_jobs (
+                    job_id, user_id, chat_id, username, child_name, age, city, good_deed,
+                    lang, persona, photo_file_id, order_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'lead_sent', ?, ?)
+                """,
+                (
+                    job_id, uid, str(chat_id), username, child_name, age,
+                    city, good_deed, lang, persona, photo_file_id, now, now,
+                ),
+            )
+            self._log_audit_conn(
+                conn,
+                'kids_greeting_created',
+                actor_id=uid,
+                product_id=KIDS_VIDEO_PRODUCT_ID,
+                details={'job_id': job_id, 'child_name': child_name, 'lang': lang, 'persona': persona},
+            )
+            row = conn.execute('SELECT * FROM kids_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            return dict(row)
+
+    def get_kids_job(self, job_id: str) -> dict | None:
+        """Return kids_job by job_id."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM kids_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            return dict(row) if row else None
+
+    def create_kids_paid_order(
+        self,
+        job_id: str,
+        user_id: str,
+        chat_id: str,
+        username: str,
+        price_xtr: int = KIDS_VIDEO_PRICE_XTR,
+    ) -> tuple[dict, dict]:
+        """Create an XTR Stars order for an HD 9:16 kids greeting video."""
+        uid = str(user_id)
+        now = utc_now_iso()
+        amount_xtr = int(price_xtr)
+        if amount_xtr <= 0:
+            raise ValueError(f'Invalid kids video price_xtr: {amount_xtr}')
+        order_id = f'ord_{uuid.uuid4().hex[:16]}'
+        invoice_payload = f'naum:{order_id}'
+
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            src_row = conn.execute('SELECT * FROM kids_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            if src_row is None or str(src_row['user_id']) != uid:
+                raise ValueError('Kids greeting job not found for user')
+
+            self._ensure_kids_product_conn(conn, price_xtr=amount_xtr)
+            target_job_id = job_id
+            if src_row['order_id']:
+                target_job_id = f'kids_{uuid.uuid4().hex[:14]}'
+                conn.execute(
+                    """
+                    INSERT INTO kids_jobs (
+                        job_id, user_id, chat_id, username, child_name, age, city, good_deed,
+                        lang, persona, photo_file_id, order_id, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?, ?)
+                    """,
+                    (
+                        target_job_id, uid, str(chat_id), username, src_row['child_name'],
+                        src_row['age'], src_row['city'], src_row['good_deed'], src_row['lang'],
+                        src_row['persona'], src_row['photo_file_id'], order_id, now, now,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE kids_jobs SET order_id = ?, status = 'awaiting_payment', updated_at = ? WHERE job_id = ?",
+                    (order_id, now, target_job_id),
+                )
+
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, user_id, chat_id, username, product_id, product_version,
+                    amount_xtr, currency, invoice_payload, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, 'XTR', ?, 'created', ?, ?)
+                """,
+                (order_id, uid, str(chat_id), username, KIDS_VIDEO_PRODUCT_ID, amount_xtr, invoice_payload, now, now),
+            )
+            self._log_audit_conn(
+                conn,
+                'kids_order_created',
+                actor_id=uid,
+                order_id=order_id,
+                product_id=KIDS_VIDEO_PRODUCT_ID,
+                details={'job_id': target_job_id, 'amount_xtr': amount_xtr},
+            )
+            order_row = conn.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            job_row = conn.execute('SELECT * FROM kids_jobs WHERE job_id = ?', (target_job_id,)).fetchone()
+            return dict(order_row), dict(job_row)
+
+    def reserve_kids_video_delivery(self, order_id: str) -> dict | None:
+        """Atomically transition an awaiting_payment paid kids video job to processing."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            cur = conn.execute(
+                """
+                UPDATE kids_jobs
+                SET status = 'processing', updated_at = ?
+                WHERE order_id = ? AND status = 'awaiting_payment'
+                  AND EXISTS (SELECT 1 FROM orders o WHERE o.order_id = ? AND o.status = 'paid')
+                """,
+                (now, order_id, order_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            row = conn.execute('SELECT * FROM kids_jobs WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def mark_kids_job_delivered(self, job_id: str, telegram_file_id: str = '') -> None:
+        """Mark a kids video job as delivered."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, order_id FROM kids_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            conn.execute(
+                "UPDATE kids_jobs SET status = 'delivered', telegram_file_id = ?, error = '', updated_at = ? WHERE job_id = ?",
+                (telegram_file_id, now, job_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'kids_video_delivered',
+                actor_id=row['user_id'] if row else '',
+                order_id=row['order_id'] if row else '',
+                product_id=KIDS_VIDEO_PRODUCT_ID,
+                details={'job_id': job_id, 'telegram_file_id': telegram_file_id},
+            )
+
+    def mark_kids_job_failed(self, job_id: str, error: str) -> None:
+        """Mark a kids video job as failed."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, order_id FROM kids_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            conn.execute(
+                "UPDATE kids_jobs SET status = 'failed', error = ?, updated_at = ? WHERE job_id = ?",
+                (error[:500], now, job_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'kids_video_failed',
+                actor_id=row['user_id'] if row else '',
+                order_id=row['order_id'] if row else '',
+                product_id=KIDS_VIDEO_PRODUCT_ID,
                 details={'job_id': job_id, 'error': error[:500]},
             )
