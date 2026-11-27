@@ -17,6 +17,9 @@ DB_FILE_MODE = 0o600
 VALID_STATUSES = frozenset({'черновик', 'проверка качества', 'готов к продаже'})
 ACTIVE_ORDER_STATUSES = frozenset({'created', 'invoice_sent', 'pre_checkout_ok'})
 DEMO_PRODUCT_ID = 'demo-ny'
+CLIP_PRODUCT_ID = 'ai-video-clip'
+CLIP_FREE_TRIAL_LIMIT = 2
+CLIP_PRICE_XTR = 50
 
 
 def utc_now_iso() -> str:
@@ -143,9 +146,28 @@ class StoreDB:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS clip_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    username TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL,
+                    source_value TEXT NOT NULL,
+                    is_free_trial INTEGER NOT NULL DEFAULT 1,
+                    order_id TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    output_path TEXT NOT NULL DEFAULT '',
+                    telegram_file_id TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_order_id ON audit_events(order_id);
+                CREATE INDEX IF NOT EXISTS idx_clip_jobs_user ON clip_jobs(user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_clip_jobs_order ON clip_jobs(order_id);
                 """
             )
         if self.db_path.exists():
@@ -494,16 +516,24 @@ class StoreDB:
                 (order['product_id'],),
             ).fetchone()
             product = dict(prod_row) if prod_row else None
-            if not product or int(product['package_ready']) != 1 or product['status'] != 'готов к продаже':
-                return reject('Товар временно недоступен для покупки.')
+            if order['product_id'] == CLIP_PRODUCT_ID:
+                clip_row = conn.execute(
+                    'SELECT * FROM clip_jobs WHERE order_id = ?',
+                    (order['order_id'],),
+                ).fetchone()
+                if not product or product['status'] != 'готов к продаже' or not clip_row:
+                    return reject('Задание на нарезку клипа недоступно или устарело.')
+            else:
+                if not product or int(product['package_ready']) != 1 or product['status'] != 'готов к продаже':
+                    return reject('Товар временно недоступен для покупки.')
 
-            version_row = conn.execute(
-                'SELECT * FROM product_versions WHERE product_id = ? AND version = ?',
-                (order['product_id'], order['product_version']),
-            ).fetchone()
-            version = dict(version_row) if version_row else None
-            if verified_order_package(packages_dir, order, version) is None:
-                return reject('Версия архива изменилась или недоступна. Оформите новый заказ.')
+                version_row = conn.execute(
+                    'SELECT * FROM product_versions WHERE product_id = ? AND version = ?',
+                    (order['product_id'], order['product_version']),
+                ).fetchone()
+                version = dict(version_row) if version_row else None
+                if verified_order_package(packages_dir, order, version) is None:
+                    return reject('Версия архива изменилась или недоступна. Оформите новый заказ.')
 
             conn.execute(
                 "UPDATE orders SET status = 'pre_checkout_ok', updated_at = ? WHERE order_id = ?",
@@ -918,3 +948,210 @@ class StoreDB:
             'demo_to_paid_conversion_pct': conv,
             'open_support_tickets': int(open_tickets['cnt'] or 0),
         }
+
+    def _ensure_clip_product_conn(self, conn: sqlite3.Connection, price_xtr: int = CLIP_PRICE_XTR) -> None:
+        """Ensure the AI Video Shorts Clipper service product exists without polluting ZIP catalog."""
+        now = utc_now_iso()
+        conn.execute(
+            """
+            INSERT INTO products (
+                product_id, category, title, description, package_contents,
+                price_uah, price_xtr, status, package_ready, package_path,
+                package_sha256, package_bytes, active_version, updated_at
+            ) VALUES (?, 'video', 'AI Shorts Clipper 9:16', ?, 'Вертикальный клип 1080x1920 MP4 с караоке-субтитрами',
+                0, ?, 'готов к продаже', 0, '', '', 0, 1, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                price_xtr = excluded.price_xtr,
+                status = 'готов к продаже',
+                updated_at = excluded.updated_at
+            """,
+            (
+                CLIP_PRODUCT_ID,
+                'Нарезка динамичных вертикальных Shorts 9:16 с караоке-субтитрами.',
+                int(price_xtr),
+                now,
+            ),
+        )
+
+    def count_user_free_clips(self, user_id: str) -> int:
+        """Return number of used (processing or delivered) free trial clips for user_id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM clip_jobs
+                WHERE user_id = ? AND is_free_trial = 1 AND status IN ('processing', 'delivered')
+                """,
+                (str(user_id),),
+            ).fetchone()
+            return int(row['cnt'] or 0)
+
+    def claim_free_clip_trial(
+        self,
+        user_id: str,
+        chat_id: str,
+        username: str,
+        source_type: str,
+        source_value: str,
+        limit: int = CLIP_FREE_TRIAL_LIMIT,
+    ) -> tuple[bool, int, dict | None]:
+        """Atomically reserve one free trial clip slot if user is below limit."""
+        uid = str(user_id)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt FROM clip_jobs
+                WHERE user_id = ? AND is_free_trial = 1 AND status IN ('processing', 'delivered')
+                """,
+                (uid,),
+            ).fetchone()
+            used = int(row['cnt'] or 0)
+            if used >= limit:
+                return False, used, None
+            job_id = f'clip_{uuid.uuid4().hex[:14]}'
+            conn.execute(
+                """
+                INSERT INTO clip_jobs (
+                    job_id, user_id, chat_id, username, source_type, source_value,
+                    is_free_trial, order_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, '', 'processing', ?, ?)
+                """,
+                (job_id, uid, str(chat_id), username, source_type, source_value[:1000], now, now),
+            )
+            trial_num = used + 1
+            self._log_audit_conn(
+                conn,
+                'clip_trial_started',
+                actor_id=uid,
+                product_id=CLIP_PRODUCT_ID,
+                details={'job_id': job_id, 'trial_num': trial_num, 'source_type': source_type},
+            )
+            job_row = conn.execute('SELECT * FROM clip_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            return True, trial_num, dict(job_row)
+
+    def create_clip_paid_order(
+        self,
+        user_id: str,
+        chat_id: str,
+        username: str,
+        source_type: str,
+        source_value: str,
+        price_xtr: int = CLIP_PRICE_XTR,
+    ) -> tuple[dict, dict]:
+        """Create an XTR order and awaiting_payment clip job after free trial limit is exhausted."""
+        uid = str(user_id)
+        now = utc_now_iso()
+        amount_xtr = int(price_xtr)
+        if amount_xtr <= 0:
+            raise ValueError(f'Invalid clip price_xtr: {amount_xtr}')
+        order_id = f'ord_{uuid.uuid4().hex[:16]}'
+        invoice_payload = f'naum:{order_id}'
+        job_id = f'clip_{uuid.uuid4().hex[:14]}'
+
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            self._ensure_clip_product_conn(conn, price_xtr=amount_xtr)
+            conn.execute(
+                """
+                INSERT INTO orders (
+                    order_id, user_id, chat_id, username, product_id, product_version,
+                    amount_xtr, currency, invoice_payload, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, 'XTR', ?, 'created', ?, ?)
+                """,
+                (order_id, uid, str(chat_id), username, CLIP_PRODUCT_ID, amount_xtr, invoice_payload, now, now),
+            )
+            conn.execute(
+                """
+                INSERT INTO clip_jobs (
+                    job_id, user_id, chat_id, username, source_type, source_value,
+                    is_free_trial, order_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'awaiting_payment', ?, ?)
+                """,
+                (job_id, uid, str(chat_id), username, source_type, source_value[:1000], order_id, now, now),
+            )
+            self._log_audit_conn(
+                conn,
+                'clip_order_created',
+                actor_id=uid,
+                order_id=order_id,
+                product_id=CLIP_PRODUCT_ID,
+                details={'job_id': job_id, 'amount_xtr': amount_xtr, 'source_type': source_type},
+            )
+            order_row = conn.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,)).fetchone()
+            job_row = conn.execute('SELECT * FROM clip_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            return dict(order_row), dict(job_row)
+
+    def get_clip_job_by_order(self, order_id: str) -> dict | None:
+        """Return clip_job associated with order_id."""
+        with self._connect() as conn:
+            row = conn.execute('SELECT * FROM clip_jobs WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def reserve_clip_delivery(self, order_id: str) -> dict | None:
+        """Atomically transition an awaiting_payment paid clip job to processing."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            cur = conn.execute(
+                """
+                UPDATE clip_jobs
+                SET status = 'processing', updated_at = ?
+                WHERE order_id = ? AND status = 'awaiting_payment'
+                  AND EXISTS (SELECT 1 FROM orders o WHERE o.order_id = ? AND o.status = 'paid')
+                """,
+                (now, order_id, order_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            row = conn.execute('SELECT * FROM clip_jobs WHERE order_id = ?', (order_id,)).fetchone()
+            return dict(row) if row else None
+
+    def mark_clip_job_delivered(
+        self,
+        job_id: str,
+        output_path: str = '',
+        telegram_file_id: str = '',
+    ) -> None:
+        """Mark a clip job as delivered."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, order_id FROM clip_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            conn.execute(
+                """
+                UPDATE clip_jobs
+                SET status = 'delivered', output_path = ?, telegram_file_id = ?, error = '', updated_at = ?
+                WHERE job_id = ?
+                """,
+                (output_path, telegram_file_id, now, job_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'clip_delivered',
+                actor_id=row['user_id'] if row else '',
+                order_id=row['order_id'] if row else '',
+                product_id=CLIP_PRODUCT_ID,
+                details={'job_id': job_id, 'telegram_file_id': telegram_file_id},
+            )
+
+    def mark_clip_job_failed(self, job_id: str, error: str) -> None:
+        """Mark a clip job as failed (frees trial slot if trial failed before delivery)."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            row = conn.execute('SELECT user_id, order_id FROM clip_jobs WHERE job_id = ?', (job_id,)).fetchone()
+            conn.execute(
+                """
+                UPDATE clip_jobs
+                SET status = 'failed', error = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (error[:500], now, job_id),
+            )
+            self._log_audit_conn(
+                conn,
+                'clip_failed',
+                actor_id=row['user_id'] if row else '',
+                order_id=row['order_id'] if row else '',
+                product_id=CLIP_PRODUCT_ID,
+                details={'job_id': job_id, 'error': error[:500]},
+            )
