@@ -15,8 +15,15 @@ from typing import AbstractSet, Callable, Mapping
 
 from build_packages import DEFAULT_PACKAGES_DIR, DEMO_PRODUCT_ID, build_demo_postcard_package
 from ingest_asset import ID_RE, MAX_INPUT_BYTES, ingest_asset, sha256_file
-from store_db import DEFAULT_DB_PATH, StoreDB
+from store_db import (
+    CLIP_FREE_TRIAL_LIMIT,
+    CLIP_PRICE_XTR,
+    CLIP_PRODUCT_ID,
+    DEFAULT_DB_PATH,
+    StoreDB,
+)
 from package_version import staged_order_package
+from video_clipper import ALLOWED_VIDEO_EXTENSIONS, clip_video, is_http_url
 
 ALLOWED_PUSH_BRANCH = 'feat/production-batch-01'
 FORBIDDEN_PUSH_BRANCHES = frozenset({'main', 'master', 'HEAD'})
@@ -199,6 +206,53 @@ def send_telegram_document(
     return res
 
 
+def send_telegram_video(
+    token: str,
+    chat_id: int | str,
+    file_path: Path,
+    caption: str = '',
+) -> dict:
+    """Upload a local MP4 video to Telegram using multipart/form-data sendVideo."""
+    boundary = f'----naumVideo{uuid.uuid4().hex}'
+    parts: list[bytes] = []
+
+    def add_field(name: str, value: str) -> None:
+        parts.append(
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f'{value}\r\n'.encode('utf-8')
+        )
+
+    add_field('chat_id', str(chat_id))
+    add_field('supports_streaming', 'true')
+    add_field('width', '1080')
+    add_field('height', '1920')
+    if caption:
+        add_field('caption', caption[:1024])
+
+    file_bytes = file_path.read_bytes()
+    parts.append(
+        f'--{boundary}\r\n'
+        f'Content-Disposition: form-data; name="video"; filename="{file_path.name}"\r\n'
+        f'Content-Type: video/mp4\r\n\r\n'.encode('utf-8')
+    )
+    parts.append(file_bytes)
+    parts.append(f'\r\n--{boundary}--\r\n'.encode('utf-8'))
+
+    body = b''.join(parts)
+    url = f'https://api.telegram.org/bot{token}/sendVideo'
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        res = json.loads(resp.read().decode('utf-8'))
+    if not res.get('ok'):
+        raise RuntimeError(f"Telegram sendVideo failed: {res.get('description', 'unknown error')}")
+    return res
+
+
 def download_telegram_file(token: str, file_path: str, dest_path: Path, max_bytes: int = MAX_INPUT_BYTES) -> None:
     """Stream-download a Telegram file with timeout and byte-limit enforcement."""
     dl_url = f'https://api.telegram.org/file/bot{token}/{file_path}'
@@ -300,6 +354,140 @@ def _handle_pre_checkout(
     api_fn(cfg.token, 'answerPreCheckoutQuery', payload)
 
 
+def _extract_video_file_id(msg_obj: dict) -> str | None:
+    """Extract Telegram video or video-document file_id from a message dict."""
+    if not isinstance(msg_obj, dict):
+        return None
+    video = msg_obj.get('video')
+    if isinstance(video, dict) and video.get('file_id'):
+        return str(video['file_id'])
+    doc = msg_obj.get('document')
+    if isinstance(doc, dict) and doc.get('file_id'):
+        mime = str(doc.get('mime_type') or '').lower()
+        fname = str(doc.get('file_name') or '').lower()
+        if mime.startswith('video/') or Path(fname).suffix in ALLOWED_VIDEO_EXTENSIONS:
+            return str(doc['file_id'])
+    return None
+
+
+def _extract_clip_source(msg: dict, effective_text: str) -> tuple[str, str] | None:
+    """Extract ('url', url) or ('file', file_id) from /clip message or reply."""
+    parts = effective_text.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ''
+    if arg:
+        if is_http_url(arg):
+            return 'url', arg
+        raise ValueError('Укажите корректную ссылку http(s):// или прикрепите видео к команде /clip.')
+
+    file_id = _extract_video_file_id(msg)
+    if file_id:
+        return 'file', file_id
+
+    reply_id = _extract_video_file_id(msg.get('reply_to_message') or {})
+    if reply_id:
+        return 'file', reply_id
+    return None
+
+
+def _run_and_send_clip(
+    source_type: str,
+    source_value: str,
+    chat_id: int | str,
+    cfg: BotConfig,
+    api_fn: Callable[[str, str, dict | None], dict],
+    download_fn: Callable[[str, str, Path], None],
+    send_video_fn: Callable[[str, int | str, Path, str], dict],
+    clip_fn: Callable[[str | Path, Path], dict],
+    caption: str,
+) -> tuple[str, str]:
+    """Download/clip source video into 9:16 karaoke MP4, upload to Telegram, and return (sha256, file_id)."""
+    with tempfile.TemporaryDirectory(prefix='naum_clip_') as tmp_str:
+        tmp_dir = Path(tmp_str)
+        clip_input: str | Path
+        if source_type == 'file':
+            finfo = api_fn(cfg.token, f'getFile?file_id={source_value}', None)['result']
+            suffix = Path(finfo['file_path']).suffix or '.mp4'
+            src_path = tmp_dir / f'input{suffix}'
+            download_fn(cfg.token, finfo['file_path'], src_path)
+            clip_input = src_path
+        else:
+            clip_input = source_value
+
+        out_dir = tmp_dir / 'out'
+        res = clip_fn(clip_input, out_dir)
+        clips = list(res.get('clips') or [])
+        if not clips:
+            raise RuntimeError('Клиппер не вернул ни одного ролика')
+        out_path = Path(clips[0]['output_path'])
+        if not out_path.is_file():
+            raise FileNotFoundError(f'Clip output missing: {out_path}')
+
+        out_sha = sha256_file(out_path)
+        resp = send_video_fn(cfg.token, chat_id, out_path, caption)
+        res_obj = (resp or {}).get('result') or {}
+        media_obj = res_obj.get('video') or res_obj.get('document') or {}
+        file_id = str(media_obj.get('file_id') or '')
+        if not isinstance(resp, dict) or resp.get('ok') is not True or not file_id:
+            raise RuntimeError('Telegram did not confirm video delivery')
+        return out_sha, file_id
+
+
+def _deliver_paid_clip_order(
+    order: dict,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB,
+    api_fn: Callable[[str, str, dict | None], dict],
+    download_fn: Callable[[str, str, Path], None],
+    send_video_fn: Callable[[str, int | str, Path, str], dict],
+    clip_fn: Callable[[str | Path, Path], dict],
+) -> None:
+    """Render and deliver a paid Stars /clip order idempotently."""
+    job = store.reserve_clip_delivery(order['order_id'])
+    if job is None:
+        return
+    try:
+        caption = (
+            f"🎬 Ваш вертикальный Shorts 9:16 с караоке-субтитрами готов!\n"
+            f"Заказ: {order['order_id']} · NAUM AI Creative Studio"
+        )
+        out_sha, file_id = _run_and_send_clip(
+            source_type=job['source_type'],
+            source_value=job['source_value'],
+            chat_id=chat_id,
+            cfg=cfg,
+            api_fn=api_fn,
+            download_fn=download_fn,
+            send_video_fn=send_video_fn,
+            clip_fn=clip_fn,
+            caption=caption,
+        )
+        store.create_or_get_delivery(order, Path(f"{job['job_id']}.mp4"), out_sha)
+        store.mark_delivery_sent(order['order_id'], telegram_file_id=file_id)
+        store.mark_clip_job_delivered(job['job_id'], output_path=f"{job['job_id']}.mp4", telegram_file_id=file_id)
+    except Exception as exc:
+        err = _sanitize_error(exc, cfg.token)
+        store.mark_clip_job_failed(job['job_id'], err)
+        store.create_or_get_delivery(order, Path(f"{job['job_id']}.mp4"), 'clip-failed')
+        store.mark_delivery_failed(order['order_id'], err)
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': f"Не удалось собрать клип по заказу {order['order_id']}. Обратитесь в /paysupport."},
+        )
+        return
+
+    try:
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': f"Спасибо за покупку! Клип по заказу {order['order_id']} доставлен. /myorders · /paysupport"},
+        )
+    except Exception:
+        store.log_audit('delivery_notification_failed', actor_id=str(order['user_id']),
+                        order_id=order['order_id'], product_id=order['product_id'])
+
+
 def _deliver_paid_order(
     order: dict,
     chat_id: int | str,
@@ -357,6 +545,9 @@ def _handle_successful_payment(
     store: StoreDB,
     api_fn: Callable[[str, str, dict | None], dict],
     send_document_fn: Callable[[str, int | str, Path, str], dict],
+    download_fn: Callable[[str, str, Path], None] = download_telegram_file,
+    send_video_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_video,
+    clip_fn: Callable[[str | Path, Path], dict] = clip_video,
 ) -> None:
     if not is_private_chat(msg):
         return
@@ -394,7 +585,20 @@ def _handle_successful_payment(
         if existing_delivery and existing_delivery.get('status') == 'sent':
             return
 
-    _deliver_paid_order(order, chat_id, cfg, store, api_fn, send_document_fn)
+    if order['product_id'] == CLIP_PRODUCT_ID:
+        if str(chat_id) != str(order['chat_id']) or str(chat_id) != str(order['user_id']):
+            return
+        _deliver_paid_clip_order(order, chat_id, cfg, store, api_fn, download_fn, send_video_fn, clip_fn)
+        return
+
+    _deliver_paid_order(
+        order,
+        chat_id,
+        cfg,
+        store,
+        api_fn,
+        send_document_fn,
+    )
 
 
 def _handle_buy_deeplink(
@@ -1013,6 +1217,161 @@ def _handle_callback_query(upd: dict, cfg: BotConfig, store, api_fn) -> None:
         return
     api_fn(cfg.token, 'answerCallbackQuery', {'callback_query_id': cb_id})
 
+def _handle_clip_command(
+    msg: dict,
+    effective_text: str,
+    chat_id: int | str,
+    cfg: BotConfig,
+    store: StoreDB | None,
+    api_fn: Callable[[str, str, dict | None], dict],
+    download_fn: Callable[[str, str, Path], None],
+    send_video_fn: Callable[[str, int | str, Path, str], dict],
+    clip_fn: Callable[[str | Path, Path], dict],
+) -> None:
+    """Handle /clip <url or video>: 1-2 free trial clips (lead magnet), then Telegram Stars (XTR)."""
+    user_id = get_sender_id(msg) or str(chat_id)
+    username = str((msg.get('from') or {}).get('username') or '').strip()
+    used = store.count_user_free_clips(user_id) if store is not None else 0
+    remaining = max(0, CLIP_FREE_TRIAL_LIMIT - used)
+
+    try:
+        source = _extract_clip_source(msg, effective_text)
+    except ValueError as exc:
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': str(exc)})
+        return
+
+    if source is None:
+        trial_line = (
+            f'У вас осталось бесплатных клипов: {remaining} из {CLIP_FREE_TRIAL_LIMIT}.'
+            if remaining > 0
+            else f'Бесплатные пробные клипы ({CLIP_FREE_TRIAL_LIMIT}/{CLIP_FREE_TRIAL_LIMIT}) использованы. Далее: {CLIP_PRICE_XTR} Stars (XTR).'
+        )
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {
+                'chat_id': chat_id,
+                'text': (
+                    '🎬 AI Shorts Clipper 9:16 (PeakCut + караоке-субтитры):\n'
+                    '• Отправьте /clip <ссылка на видео>\n'
+                    '• Или прикрепите видео с подписью /clip (либо ответьте /clip на видео)\n'
+                    f'{trial_line}'
+                ),
+            },
+        )
+        return
+
+    source_type, source_value = source
+    if store is None:
+        api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': 'Сервис нарезки клипов временно недоступен: база не настроена.'})
+        return
+
+    claimed, trial_num, job = store.claim_free_clip_trial(
+        user_id=user_id,
+        chat_id=str(chat_id),
+        username=username,
+        source_type=source_type,
+        source_value=source_value,
+        limit=CLIP_FREE_TRIAL_LIMIT,
+    )
+    if claimed and job is not None:
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {
+                'chat_id': chat_id,
+                'text': (
+                    f'🎬 Нарезаю вертикальный ролик 9:16 с караоке-субтитрами... '
+                    f'(пробный клип {trial_num}/{CLIP_FREE_TRIAL_LIMIT} бесплатно)'
+                ),
+            },
+        )
+        left_after = max(0, CLIP_FREE_TRIAL_LIMIT - trial_num)
+        tail = (
+            f'Остался ещё {left_after} бесплатный клип!'
+            if left_after > 0
+            else f'Пробный лимит исчерпан. Следующий клип — {CLIP_PRICE_XTR} Stars (XTR).'
+        )
+        caption = f'🎬 Готово! Вертикальный клип 9:16 (пробный {trial_num}/{CLIP_FREE_TRIAL_LIMIT}).\n{tail}'
+        try:
+            _, tg_file_id = _run_and_send_clip(
+                source_type=source_type,
+                source_value=source_value,
+                chat_id=chat_id,
+                cfg=cfg,
+                api_fn=api_fn,
+                download_fn=download_fn,
+                send_video_fn=send_video_fn,
+                clip_fn=clip_fn,
+                caption=caption,
+            )
+            store.mark_clip_job_delivered(job['job_id'], telegram_file_id=tg_file_id)
+        except Exception as exc:
+            err = _sanitize_error(exc, cfg.token)
+            store.mark_clip_job_failed(job['job_id'], err)
+            api_fn(
+                cfg.token,
+                'sendMessage',
+                {'chat_id': chat_id, 'text': f'Не удалось обработать видео: {err}'},
+            )
+        return
+
+    # Free trial exhausted -> Telegram Stars (XTR) paywall
+    if not cfg.payments_enabled:
+        store.log_audit('clip_paywall_paused', actor_id=user_id, product_id=CLIP_PRODUCT_ID)
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {
+                'chat_id': chat_id,
+                'text': (
+                    f'Вы уже использовали {CLIP_FREE_TRIAL_LIMIT} бесплатных пробных клипа (лид-магнит).\n'
+                    f'Следующая нарезка 9:16 с караоке-субтитрами стоит {CLIP_PRICE_XTR} Stars (XTR).\n'
+                    f'Оплата Telegram Stars ожидает включения владельцем. По вопросам: /support.'
+                ),
+            },
+        )
+        return
+
+    order, paid_job = store.create_clip_paid_order(
+        user_id=user_id,
+        chat_id=str(chat_id),
+        username=username,
+        source_type=source_type,
+        source_value=source_value,
+        price_xtr=CLIP_PRICE_XTR,
+    )
+    title = 'AI Shorts 9:16 с субтитрами'
+    desc = (
+        f'Бесплатные пробные клипы ({CLIP_FREE_TRIAL_LIMIT}/{CLIP_FREE_TRIAL_LIMIT}) использованы. '
+        f'Нарезка вертикального ролика 1080x1920 с караоке-субтитрами.'
+    )
+    res = api_fn(
+        cfg.token,
+        'sendInvoice',
+        {
+            'chat_id': chat_id,
+            'title': title,
+            'description': desc[:255],
+            'payload': order['invoice_payload'],
+            'provider_token': '',
+            'currency': 'XTR',
+            'prices': [{'label': title, 'amount': int(order['amount_xtr'])}],
+            'start_parameter': 'clip_short',
+        },
+    )
+    if isinstance(res, dict) and res.get('ok') is False:
+        store.update_order_status(order['order_id'], 'cancelled', actor_id=user_id, details={'error': res})
+        store.mark_clip_job_failed(paid_job['job_id'], 'sendInvoice rejected')
+        api_fn(
+            cfg.token,
+            'sendMessage',
+            {'chat_id': chat_id, 'text': 'Не удалось выставить счёт Stars. Попробуйте позже или напишите в /paysupport.'},
+        )
+    else:
+        store.update_order_status(order['order_id'], 'invoice_sent', actor_id=user_id)
+
+
 def process_update(
     upd: dict,
     cfg: BotConfig,
@@ -1022,6 +1381,8 @@ def process_update(
     push_fn: Callable[[Path, str, str, str], None] = git_push_preview,
     send_document_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_document,
     send_photo_fn: Callable[..., dict] = send_telegram_photo,
+    send_video_fn: Callable[[str, int | str, Path, str], dict] = send_telegram_video,
+    clip_fn: Callable[[str | Path, Path], dict] = clip_video,
 ) -> None:
     """Process a single Telegram update with strict role separation and private-chat admin checks."""
     if not cfg.owner_ids:
@@ -1055,17 +1416,30 @@ def process_update(
 
     if msg.get('successful_payment'):
         if store is not None:
-            _handle_successful_payment(upd, msg, chat_id, cfg, store, api_fn, send_document_fn)
+            _handle_successful_payment(
+                upd,
+                msg,
+                chat_id,
+                cfg,
+                store,
+                api_fn,
+                send_document_fn,
+                download_fn=download_fn,
+                send_video_fn=send_video_fn,
+                clip_fn=clip_fn,
+            )
         return
 
     text = (msg.get('text') or '').strip()
+    caption_text = (msg.get('caption') or '').strip()
     cmd = text.split()[0].split('@')[0].lower() if text.startswith('/') else ''
+    caption_cmd = caption_text.split()[0].split('@')[0].lower() if caption_text.startswith('/') else ''
     owner = is_owner(msg, cfg.owner_ids)
     private = is_private_chat(msg)
     admin = owner and private
 
     if store is not None and isinstance(upd.get('update_id'), int):
-        if not store.mark_update_processed(upd['update_id'], cmd or 'message'):
+        if not store.mark_update_processed(upd['update_id'], cmd or caption_cmd or 'message'):
             return
 
     if cmd == '/start':
@@ -1095,7 +1469,7 @@ def process_update(
                     'text': (
                         f"Здравствуйте! Заявка по NAUM AI Creative Studio ({arg or 'общий запрос'}) принята.\n"
                         f"Бесплатная демо-открытка: /start demo_ny\n"
-                        f"Доступные команды: /catalog, /myorders, /support, /paysupport."
+                        f"Доступные команды: /clip, /catalog, /myorders, /support, /paysupport."
                     ),
                 },
             )
@@ -1111,6 +1485,55 @@ def process_update(
 
     if cmd in ('/support', '/paysupport') and private:
         _handle_support_command(cmd, text, msg, chat_id, cfg, store, api_fn)
+        return
+
+    if (cmd == '/clip' or (not text and caption_cmd == '/clip')) and private:
+        _handle_clip_command(
+            msg=msg,
+            effective_text=text or caption_text,
+            chat_id=chat_id,
+            cfg=cfg,
+            store=store,
+            api_fn=api_fn,
+            download_fn=download_fn,
+            send_video_fn=send_video_fn,
+            clip_fn=clip_fn,
+        )
+        return
+
+    if cmd in ('/mykolay', '/santa'):
+        parts = text[len(cmd):].strip().split(maxsplit=1)
+        name = parts[0] if parts else ""
+        deed = parts[1] if len(parts) > 1 else ""
+        if not name:
+            api_fn(cfg.token, 'sendMessage', {
+                'chat_id': chat_id,
+                'text': '🎅 Напишіть ім\'я дитини (і за що похвалити):\nНаприклад:\n/mykolay Артемчик слухав маму\n\nІ я за 10 секунд зроблю іменну Грамоту та казку!',
+            })
+            return
+        try:
+            import asyncio, scripts.kids_greeting as kg
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as c_tmp:
+                c_path = Path(c_tmp.name)
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as a_tmp:
+                a_path = Path(a_tmp.name)
+            try:
+                kg.render_certificate(cfg.repo, name, "Україна", c_path)
+                asyncio.run(kg.generate_nicholas_audio(name, deed, a_path, lang="uk"))
+                send_photo_fn(
+                    cfg.token,
+                    chat_id,
+                    c_path,
+                    f'📜 Грамота чемної дитини для {name}!\n\nХочете повне святкове відео 9:16 зі скарбами та фото малюка всього за 39 грн (45 Stars)? Натисніть кнопку нижче:',
+                    {'inline_keyboard': [[{'text': '🎬 Замовити персональне відео (39 грн)', 'callback_data': f'buy_video:{name[:18]}'}]]}
+                )
+                if store is not None:
+                    store.log_event('kids_greeting_created', user_id=str(get_sender_id(msg) or chat_id), details={'name': name})
+            finally:
+                c_path.unlink(missing_ok=True)
+                a_path.unlink(missing_ok=True)
+        except Exception as exc:
+            api_fn(cfg.token, 'sendMessage', {'chat_id': chat_id, 'text': f'Помилка створення привітання: {_sanitize_error(exc, cfg.token)}'})
         return
 
     if cmd == '/card':
