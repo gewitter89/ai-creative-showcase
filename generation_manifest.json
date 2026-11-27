@@ -1,0 +1,96 @@
+{
+  "batch": "01",
+  "status": "draft_not_for_sale",
+  "items": [
+    {
+      "id": "ny-kyiv-01",
+      "category": "newyear",
+      "preview_path": "assets/newyear/ny-kyiv-01/preview.webp",
+      "delivery_requirements": "Печатная версия 150×100 мм при 300 dpi: 1772×1181 px или больше при том же отношении сторон; отдельная версия для соцсетей. После генерации добавить «З Новим 2027 роком!» вручную, проверить орфографию.",
+      "prompt": "Create an original premium winter holiday postcard illustration of Kyiv at blue hour, Maidan Nezalezhnosti with a recognizable Independence Monument and softly lit surrounding buildings, light snowfall, deep midnight blue sky, warm amber Christmas lights, restrained Ukrainian blue and gold accents, elegant festive atmosphere, realistic architectural details, balanced cinematic composition, fine detail but not cluttered, horizontal 3:2 composition, clear open sky for a later greeting. No letters, text, logos, flags with inscriptions, watermarks, frames, or mockup. Do not imitate a particular artist.",
+      "status": "qa_pending",
+      "original_sha256": "98f153cb22eb635199f7ae172f1ace692ff7d021af775eeaee73c5bbd29d7269",
+      "original_dimensions": "1024x682"
+    },
+    {
+      "id": "ny-cozy-02",
+      "category": "newyear",
+      "preview_path": "assets/newyear/ny-cozy-02/preview.webp",
+      "delivery_requirements": "150×100 мм, 300 dpi (1772×1181 px или больше); отдельный PNG без текста и версия с надписью «З Різдвом Христовим!» после ручной вёрстки.",
+      "prompt": "Original luxury Christmas greeting card illustration, close view of a warm wooden window looking onto a snowy quiet village at twilight, softly glowing candles, pine sprigs, red berries, subtle champagne-gold highlights, tactile watercolor and fine paper texture, sophisticated editorial composition, warm cream and forest green palette, horizontal 3:2, generous clean negative space in the upper left for a greeting added later. No typography, no logos, no people, no watermark, no border, no mockup.",
+      "status": "qa_pending",
+      "original_sha256": "87316aa882f56e6e77a1ef24cc1cc365b8f18c99daa92eb67bea5e4acf929cfe",
+      "original_dimensions": "1024x682"
+    },
+    {
+      "id": "ny-minimal-03",
+      "category": "newyear",
+      "preview_path": "assets/newyear/ny-minimal-03/preview.webp",
+      "delivery_requirements": "PNG без текста и JPG с вручную набранным «2027» и поздравлением; 150×100 мм, 300 dpi. Не обещать физическое тиснение или металлизированную печать.",
+      "prompt": "Original high-end minimalist New Year postcard background, rich dark evergreen matte paper, one delicate champagne-gold botanical wreath of fir needles and tiny stars, realistic subtle metallic foil appearance, generous clean center for later typography, elegant restrained luxury stationery design, perfect flat front-facing artwork, horizontal 3:2, no text, numbers, logos, watermarks, borders or hands. No mockup, no perspective distortion.",
+      "status": "qa_pending",
+      "original_sha256": "5761ef44275b379d6a80f4b4000a5820edf03cb7f359806cda9ff64b42652e8a",
+      "original_dimensions": "1536x1024"
+    },
+    {
+      "id": "ps-pack-01",
+      "category": "photoshop",
+      "preview_path": "assets/photoshop/ps-pack-01/preview.webp",
+      "delivery_requirements": "6 отдельных PNG (цель 3000×2000 px при сохранении качества): VARIANT = blue diagonal light streak; warm golden bokeh clusters; subtle icy blue edge glow; warm circular lens flare; sparse white sparkling snow dust; violet-blue soft light leak. Проверить чёрный фон, Screen blending в Photoshop; не выдавать чёрный фон за прозрачность.",
+      "prompt": "Create ONE isolated photographic light-effect overlay on a perfectly solid pure black RGB 0,0,0 background. The effect is [VARIANT]. Soft realistic luminous glow, clean isolated edges, delicate gradients, no foreground objects, no text, no logos, no watermark, no texture in the black background, horizontal 3:2. Preserve dark background for Photoshop Screen blending. Output one asset per generation, not a contact sheet.",
+      "status": "qa_pending",
+      "original_sha256": "0105e0812b34465c76e7b15d47dd8dc9373900694a574f3366fd71be343a69be",
+      "original_dimensions": "1536x1024"
+    },
+    {
+      "id": "ps-snow-02",
+      "category": "photoshop",
+      "preview_path": "assets/photoshop/ps-snow-02/preview.webp",
+      "delivery_requirements": "6 отдельных PNG: VARIANT = light fine snow; large soft foreground snowflakes; diagonal windblown snow; delicate flurries; heavy snow with three depth layers; sparse crystalline sparkles. Проверить наложение Screen и отсутствие серой дымки; целевой размер 3000×2000 px только после проверки.",
+      "prompt": "Generate ONE photorealistic isolated falling snow overlay on solid pure black RGB 0,0,0. [VARIANT]. Natural varied particle size, controlled density, plausible depth of field, no ground, trees, sky, scenery, letters or branding. Clean black areas without gray haze, horizontal 3:2, no borders or mockup. Output one effect per generation.",
+      "status": "qa_pending",
+      "original_sha256": "91477e81b7519ad36eba145274e4cb3429d9cd8866945495752bc376be0ce768",
+      "original_dimensions": "1536x1024"
+    },
+    {
+      "id": "ps-bg-03",
+      "category": "photoshop",
+      "preview_path": "assets/photoshop/ps-bg-03/preview.webp",
+      "delivery_requirements": "4 фона: VARIANT = matte midnight blue platform with subtle frost; ivory snow-textured tabletop and warm champagne bokeh; dark pine-green backdrop with elegant fir sprigs at edges; burgundy velvet backdrop with subtle warm light. Целевой размер 2400×3000 px или максимально качественный исходник. Пакет растровый, не PSD.",
+      "prompt": "Create ONE original premium winter product-photography background, [VARIANT], portrait 4:5. A clean empty central area and foreground suitable for placing a product later, sophisticated editorial lighting, physically plausible materials, refined minimal composition, subtle seasonal elements at the edges, no products, people, letters, watermarks, logos, or mockup frame. Render one background at a time, no collage.",
+      "status": "qa_pending",
+      "original_sha256": "fd9cb001a749165a5a46b5bff0c9bc2dfb30a3323028685cbe0e362b68ccb3fe",
+      "original_dimensions": "1122x1402"
+    },
+    {
+      "id": "3d-ref-01",
+      "category": "3d",
+      "preview_path": "assets/3d/3d-ref-01/preview.webp",
+      "delivery_requirements": "Три отдельные проекции: VIEW = front; left side; back. После первой генерации использовать её как референс для согласования геометрии следующих ракурсов. PNG 1:1; сверить силуэт и детали. STL/3MF не входит, печатаемость не подтверждена.",
+      "prompt": "Create ONE orthographic design-reference image for an original cute small seated dragon collectible figurine intended for later 3D modeling. [VIEW] view. Consistent reference geometry: round head, two short rounded horns, rounded folded wings close to the body, curled thick tail resting on a wide flat circular base, stout limbs, smooth solid surfaces, no thin floating parts, no props. Neutral warm-gray clay material, plain light gray background, even diffuse light, centered, square 1:1. Orthographic view, no wide-angle perspective, no text, labels, logos or watermark. This is concept art, not a printable model.",
+      "status": "qa_pending",
+      "original_sha256": "b301d9a6fba5da76473f686df80bd341fdc78da40d6c6624939f1ee045175a48",
+      "original_dimensions": "1254x1254"
+    },
+    {
+      "id": "3d-tree-02",
+      "category": "3d",
+      "preview_path": "assets/3d/3d-tree-02/preview.webp",
+      "delivery_requirements": "Три PNG: front / left side / back. Использовать первое изображение как референс для следующих ракурсов. STL/3MF не входит; фактическая геометрия и печать требуют отдельного моделирования и проверки.",
+      "prompt": "Create ONE orthographic design-reference image for an original minimalist Nordic-style tabletop Christmas tree object. [VIEW] view. Consistent geometry: three broad stacked rounded conical tiers, smooth scalloped edges, one thick integrated rounded star at the top, wide flat circular base, single solid-looking silhouette without detached decorations, muted monochrome clay render on a plain light-gray background, diffuse studio light, centered 1:1, orthographic, no text, branding, dimensions or watermark. This is reference art, not a verified 3D printable mesh.",
+      "status": "qa_pending",
+      "original_sha256": "19f6cf95ed5984ab5f996537b36a42fbfdeab29a09db55c5f1d656394aa28cf6",
+      "original_dimensions": "1254x1254"
+    },
+    {
+      "id": "3d-owl-03",
+      "category": "3d",
+      "preview_path": "assets/3d/3d-owl-03/preview.webp",
+      "delivery_requirements": "Три PNG: front / left side / back. Сохранять геометрию и пропорции по первому референсу. Без STL/3MF, без обещания печатаемости.",
+      "prompt": "Create ONE orthographic design-reference image for an original small adorable winter owl figurine with a thick integrated scarf. [VIEW] view. Consistent silhouette: plump rounded body, two recessed round eyes, tiny rounded beak, wings merged into sides, scarf wraps the neck with short rounded ends attached to body, wide flat oval base, no loose or fragile details. Monochrome gray clay render, plain neutral background, soft even light, centered 1:1, orthographic, no text, logos or watermark. Concept only, not a printable model.",
+      "status": "qa_pending",
+      "original_sha256": "047f4f0454e238754c783fe9e5734af10b59c1c6247a6d30e5c2fd019dffbf40",
+      "original_dimensions": "1254x1254"
+    }
+  ]
+}
